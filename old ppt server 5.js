@@ -637,42 +637,6 @@ app.post('/presentations', upload.single('presentation'), (req, res) => {
   }, res);
 });
 
-// Add this endpoint to server.js (around line 400, with other presentation endpoints)
-app.put('/presentation/:id', async (req, res) => {
-  const presentationId = req.params.id;
-  const { title, summary, author, topics } = req.body;
-  
-  try {
-    // Update in MongoDB
-    const result = await Presentation.findOneAndUpdate(
-      { id: presentationId, isDeleted: false },
-      {
-        $set: {
-          title: title || undefined,
-          summary: summary || undefined,
-          author: author || undefined,
-          topics: topics || undefined
-        }
-      },
-      { new: true }
-    );
-    
-    if (!result) {
-      return res.status(404).json({ error: 'Presentation not found' });
-    }
-    
-    // Update memory cache
-    if (presentations[presentationId]) {
-      presentations[presentationId] = result.toObject();
-    }
-    
-    res.json({ success: true, presentation: result });
-  } catch (err) {
-    console.error(`Error updating presentation: ${err}`);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
 // Get presentation info endpoint
 app.get('/presentation/:id', async (req, res) => {
   const presentationId = req.params.id;
