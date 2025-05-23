@@ -172,7 +172,7 @@ app.get('/', (req, res) => {
 });
 
 // Upload and convert PowerPoint endpoint
-app.post('/convert', upload.single('presentation'), (req, res) => {
+app.post('/convert', upload.single('presentation'), async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: 'No file uploaded' });
   }
@@ -203,14 +203,53 @@ app.post('/convert', upload.single('presentation'), (req, res) => {
     viewCount: 0
   };
   
-  // Add presentation to topic indexes (memory cache)
-  topics.forEach(topic => {
-    topic = topic.toLowerCase();
-    if (!presentationsByTopic[topic]) {
-      presentationsByTopic[topic] = [];
+  // Helper function to save to database BEFORE responding
+  async function saveAndRespond(presentationData, slideData) {
+    try {
+      console.log(`Attempting to save presentation ${presentationData.id} to database...`);
+      
+      // Save to MongoDB FIRST
+      const presentationDoc = new Presentation(presentationData);
+      const savedDoc = await presentationDoc.save();
+      console.log(`✅ Successfully saved presentation ${presentationData.id} to database`);
+      
+      // Add to memory cache only after successful DB save
+      presentations[presentationData.id] = presentationData;
+      
+      // Add presentation to topic indexes (memory cache)
+      topics.forEach(topic => {
+        topic = topic.toLowerCase();
+        if (!presentationsByTopic[topic]) {
+          presentationsByTopic[topic] = [];
+        }
+        presentationsByTopic[topic].push(presentationId);
+      });
+      
+      // NOW send success response
+      res.json({
+        id: presentationData.id,
+        originalName: presentationData.originalName,
+        title: presentationData.title,
+        slideCount: slideData.slideCount,
+        slides: slideData.slides,
+        slideTexts: slideData.slideTexts,
+        status: slideData.status || "success",
+        message: slideData.message,
+        topics: presentationData.topics
+      });
+      
+    } catch (error) {
+      console.error(`❌ CRITICAL: Failed to save presentation to database: ${error}`);
+      
+      // Send error response instead of fake success
+      res.status(500).json({
+        error: "Failed to save presentation to database",
+        details: error.message,
+        id: presentationData.id,
+        status: "database_error"
+      });
     }
-    presentationsByTopic[topic].push(presentationId);
-  });
+  }
   
   // Create output directory
   if (!fs.existsSync(outputDir)) {
@@ -255,31 +294,15 @@ app.post('/convert', upload.single('presentation'), (req, res) => {
       presentation.slideTexts = slideTexts;
       presentation.isPlaceholder = true;
       
-      // Save to memory cache
-      presentations[presentationId] = presentation;
-      
-      // Save to MongoDB
-      const presentationDoc = new Presentation(presentation);
-      presentationDoc.save()
-        .then(() => {
-          console.log(`Placeholder presentation ${presentationId} saved to database`);
-        })
-        .catch(err => {
-          console.error(`Error saving placeholder presentation to database: ${err}`);
-        });
-      
-      // Return the placeholder slides
-      return res.json({
-        id: presentationId,
-        originalName: req.file.originalname,
-        title: title,
+      // Save to database BEFORE responding
+      await saveAndRespond(presentation, {
         slideCount: placeholderCount,
         slides: placeholderUrls,
         slideTexts: slideTexts,
         status: "placeholders_created",
-        message: "LibreOffice is not available. Generated placeholder slides instead.",
-        topics: topics
+        message: "LibreOffice is not available. Generated placeholder slides instead."
       });
+      return;
     }
   }
   
@@ -298,20 +321,20 @@ app.post('/convert', upload.single('presentation'), (req, res) => {
   const pdfCmd = `libreoffice --headless --convert-to pdf --outdir ${outputDir} ${inputFile}`;
   console.log(`Executing PDF conversion: ${pdfCmd}`);
   
-  exec(pdfCmd, (error, stdout, stderr) => {
+  exec(pdfCmd, async (error, stdout, stderr) => {
     if (error) {
       console.error(`PDF conversion error: ${error.message}`);
-      fallbackToJpgConversion();
+      await fallbackToJpgConversion();
       return;
     }
     
     console.log(`PDF conversion output: ${stdout}`);
     
     // Check if PDF was created
-    fs.readdir(outputDir, (err, files) => {
+    fs.readdir(outputDir, async (err, files) => {
       if (err) {
         console.error(`Error reading output directory: ${err.message}`);
-        fallbackToJpgConversion();
+        await fallbackToJpgConversion();
         return;
       }
       
@@ -320,7 +343,7 @@ app.post('/convert', upload.single('presentation'), (req, res) => {
       
       if (pdfFiles.length === 0) {
         console.log('No PDF files were generated. Falling back to JPG conversion...');
-        fallbackToJpgConversion();
+        await fallbackToJpgConversion();
         return;
       }
       
@@ -396,29 +419,11 @@ app.post('/convert', upload.single('presentation'), (req, res) => {
           presentation.slideTexts = slideTexts;
           presentation.isPlaceholder = false;
           
-          // Store in memory cache
-          presentations[presentationId] = presentation;
-          
-          // Save to MongoDB
-          const presentationDoc = new Presentation(presentation);
-          presentationDoc.save()
-            .then(() => {
-              console.log(`Presentation ${presentationId} saved to database`);
-            })
-            .catch(err => {
-              console.error(`Error saving presentation to database: ${err}`);
-            });
-          
-          // Return presentation data
-          res.json({
-            id: presentationId,
-            originalName: req.file.originalname,
-            title: title,
+          // Save to database BEFORE responding
+          await saveAndRespond(presentation, {
             slideCount: renamedImageUrls.length,
             slides: renamedImageUrls,
-            slideTexts: slideTexts,
-            topics: topics,
-            status: "success"
+            slideTexts: slideTexts
           });
           
           // Clean up temporary files
@@ -436,37 +441,37 @@ app.post('/convert', upload.single('presentation'), (req, res) => {
           return;
         } else {
           console.log('PDF has no pages. Falling back to JPG conversion...');
-          fallbackToJpgConversion();
+          await fallbackToJpgConversion();
         }
       } catch (pdfError) {
         console.error(`Error processing PDF: ${pdfError.message}`);
-        fallbackToJpgConversion();
+        await fallbackToJpgConversion();
       }
     });
   });
   
   // Fallback function for JPG conversion if PDF route fails
-  function fallbackToJpgConversion() {
+  async function fallbackToJpgConversion() {
     console.log('Falling back to direct JPG conversion...');
     
     // Use LibreOffice to convert PowerPoint to JPG
     const cmd = `libreoffice --headless --convert-to jpg:"draw_jpg_Export" --outdir ${outputDir} ${inputFile}`;
     console.log(`Executing fallback command: ${cmd}`);
     
-    exec(cmd, (error, stdout, stderr) => {
+    exec(cmd, async (error, stdout, stderr) => {
       if (error) {
         console.error(`Conversion error: ${error.message}`);
-        createFallbackPlaceholders();
+        await createFallbackPlaceholders();
         return;
       }
       
       console.log(`Conversion output: ${stdout}`);
       
       // Get the generated images
-      fs.readdir(outputDir, (err, files) => {
+      fs.readdir(outputDir, async (err, files) => {
         if (err) {
           console.error(`Error reading output directory: ${err.message}`);
-          createFallbackPlaceholders();
+          await createFallbackPlaceholders();
           return;
         }
         
@@ -477,7 +482,7 @@ app.post('/convert', upload.single('presentation'), (req, res) => {
         // If no images were generated, create placeholders
         if (imageFiles.length === 0) {
           console.log('No images were generated. Creating placeholders...');
-          createFallbackPlaceholders();
+          await createFallbackPlaceholders();
           return;
         }
         
@@ -536,29 +541,11 @@ app.post('/convert', upload.single('presentation'), (req, res) => {
         presentation.slideTexts = slideTexts;
         presentation.isPlaceholder = false;
         
-        // Store in memory cache
-        presentations[presentationId] = presentation;
-        
-        // Save to MongoDB
-        const presentationDoc = new Presentation(presentation);
-        presentationDoc.save()
-          .then(() => {
-            console.log(`Fallback presentation ${presentationId} saved to database`);
-          })
-          .catch(err => {
-            console.error(`Error saving fallback presentation to database: ${err}`);
-          });
-        
-        // Return presentation data
-        res.json({
-          id: presentationId,
-          originalName: req.file.originalname,
-          title: title,
+        // Save to database BEFORE responding
+        await saveAndRespond(presentation, {
           slideCount: renamedImageUrls.length,
           slides: renamedImageUrls,
-          slideTexts: slideTexts,
-          topics: topics,
-          status: "success"
+          slideTexts: slideTexts
         });
         
         // Clean up the uploaded file
@@ -570,7 +557,7 @@ app.post('/convert', upload.single('presentation'), (req, res) => {
   }
   
   // Helper function to create fallback placeholders
-  function createFallbackPlaceholders() {
+  async function createFallbackPlaceholders() {
     const estimatedSlideCount = 23; // Default to 23 slides
     const placeholderUrls = [];
     const slideTexts = [];
@@ -589,28 +576,11 @@ app.post('/convert', upload.single('presentation'), (req, res) => {
     presentation.slideTexts = slideTexts;
     presentation.isPlaceholder = true;
     
-    // Save in memory cache
-    presentations[presentationId] = presentation;
-    
-    // Save to MongoDB
-    const presentationDoc = new Presentation(presentation);
-    presentationDoc.save()
-      .then(() => {
-        console.log(`Fallback placeholders presentation ${presentationId} saved to database`);
-      })
-      .catch(err => {
-        console.error(`Error saving fallback placeholders presentation to database: ${err}`);
-      });
-    
-    // Return the placeholder slides
-    res.json({
-      id: presentationId,
-      originalName: req.file.originalname,
-      title: title,
+    // Save to database BEFORE responding
+    await saveAndRespond(presentation, {
       slideCount: estimatedSlideCount,
       slides: placeholderUrls,
       slideTexts: slideTexts,
-      topics: topics,
       status: "fallback_placeholders",
       message: "Conversion failed. Generated distinct placeholder slides instead."
     });
