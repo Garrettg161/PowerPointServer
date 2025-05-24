@@ -1,4 +1,4 @@
-// server.js - PowerPoint Conversion Server v 1.5 with MongoDB Persistence
+// server.js - PowerPoint Conversion Server v 1.6 with FIXED MongoDB Persistence
 const express = require('express');
 const multer = require('multer');
 const fs = require('fs');
@@ -67,7 +67,7 @@ const fileFilter = (req, file, cb) => {
   }
 };
 
-// Set up multer upload
+// Set up multer upload with progress tracking
 const upload = multer({
   storage: storage,
   fileFilter: fileFilter,
@@ -83,11 +83,70 @@ const presentationsByTopic = {};
 // Track which users have seen which presentations
 const userPresentationHistory = {};
 
+// CRITICAL FIX: Function to ensure database write succeeds before responding
+async function saveToDatabase(presentationData) {
+  console.log(`🔄 ATTEMPTING DATABASE SAVE for presentation: ${presentationData.id}`);
+  console.log(`📊 Data being saved:`, JSON.stringify({
+    id: presentationData.id,
+    title: presentationData.title,
+    slideCount: presentationData.slideCount,
+    topics: presentationData.topics
+  }, null, 2));
+
+  try {
+    // First, check if presentation already exists
+    const existingPresentation = await Presentation.findOne({ id: presentationData.id });
+    
+    if (existingPresentation) {
+      console.log(`⚠️  Presentation ${presentationData.id} already exists in database. Updating...`);
+      
+      // Update existing presentation
+      const updatedPresentation = await Presentation.findOneAndUpdate(
+        { id: presentationData.id },
+        presentationData,
+        { new: true, upsert: false }
+      );
+      
+      console.log(`✅ SUCCESSFULLY UPDATED presentation ${presentationData.id} in database`);
+      return updatedPresentation.toObject();
+    } else {
+      // Create new presentation
+      const presentationDoc = new Presentation(presentationData);
+      const savedDoc = await presentationDoc.save();
+      
+      console.log(`✅ SUCCESSFULLY SAVED NEW presentation ${presentationData.id} to database`);
+      console.log(`📝 Database document ID: ${savedDoc._id}`);
+      
+      return savedDoc.toObject();
+    }
+  } catch (error) {
+    console.error(`❌ CRITICAL DATABASE ERROR for presentation ${presentationData.id}:`, error);
+    throw error; // Re-throw to handle in calling function
+  }
+}
+
+// CRITICAL FIX: Function to verify database save succeeded
+async function verifyDatabaseSave(presentationId) {
+  try {
+    const foundPresentation = await Presentation.findOne({ id: presentationId });
+    if (foundPresentation) {
+      console.log(`✅ VERIFICATION SUCCESSFUL: Presentation ${presentationId} found in database`);
+      return true;
+    } else {
+      console.error(`❌ VERIFICATION FAILED: Presentation ${presentationId} NOT found in database`);
+      return false;
+    }
+  } catch (error) {
+    console.error(`❌ VERIFICATION ERROR for ${presentationId}:`, error);
+    return false;
+  }
+}
+
 // Function to load presentations from database on startup
 async function loadPresentationsFromDatabase() {
   try {
     const dbPresentations = await Presentation.find({ isDeleted: false });
-    console.log(`Loaded ${dbPresentations.length} presentations from database`);
+    console.log(`📚 Loaded ${dbPresentations.length} presentations from database`);
     
     // Populate the in-memory storage from database
     dbPresentations.forEach(pres => {
@@ -106,25 +165,26 @@ async function loadPresentationsFromDatabase() {
       });
     });
     
-    console.log('Presentations successfully loaded from database to memory');
+    console.log('✅ Presentations successfully loaded from database to memory');
+    console.log(`📊 Memory cache now contains: ${Object.keys(presentations).length} presentations`);
   } catch (err) {
-    console.error(`Error loading presentations from database: ${err}`);
+    console.error(`❌ Error loading presentations from database: ${err}`);
   }
 }
 
 // Function to check if LibreOffice is installed
 function checkLibreOfficeInstallation() {
   try {
-    console.log('Checking LibreOffice installation...');
+    console.log('🔍 Checking LibreOffice installation...');
     const result = execSync('which libreoffice || echo "not found"').toString().trim();
     if (result === "not found") {
-      console.error('LibreOffice is not installed or not in PATH');
+      console.error('❌ LibreOffice is not installed or not in PATH');
       return false;
     }
-    console.log(`LibreOffice found at: ${result}`);
+    console.log(`✅ LibreOffice found at: ${result}`);
     return true;
   } catch (error) {
-    console.error('Error checking for LibreOffice:', error.message);
+    console.error('❌ Error checking for LibreOffice:', error.message);
     return false;
   }
 }
@@ -134,10 +194,10 @@ function createPlaceholderImage(outputPath, slideNumber, title) {
   try {
     const placeholderText = `Placeholder for slide ${slideNumber}\nTitle: ${title}\n\nLibreOffice is not installed on the server,\nso actual slide conversion is not available.`;
     fs.writeFileSync(outputPath, placeholderText);
-    console.log(`Created placeholder at ${outputPath}`);
+    console.log(`📝 Created placeholder at ${outputPath}`);
     return true;
   } catch (error) {
-    console.error(`Error creating placeholder: ${error.message}`);
+    console.error(`❌ Error creating placeholder: ${error.message}`);
     return false;
   }
 }
@@ -154,10 +214,10 @@ function createDistinctPlaceholder(outputPath, slideNumber, title) {
     }
     
     fs.writeFileSync(outputPath, placeholderText);
-    console.log(`Created distinct placeholder for slide ${slideNumber}`);
+    console.log(`📝 Created distinct placeholder for slide ${slideNumber}`);
     return true;
   } catch (error) {
-    console.error(`Error creating distinct placeholder: ${error.message}`);
+    console.error(`❌ Error creating distinct placeholder: ${error.message}`);
     return false;
   }
 }
@@ -166,18 +226,39 @@ function createDistinctPlaceholder(outputPath, slideNumber, title) {
 app.use('/slides', express.static(path.join(__dirname, 'public', 'slides')));
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Health check endpoint
-app.get('/', (req, res) => {
-  res.send('PowerPoint Conversion Server is running');
+// PROGRESS TRACKING MIDDLEWARE
+app.use('/convert', (req, res, next) => {
+  let totalBytes = 0;
+  let uploadedBytes = 0;
+
+  // Track upload progress
+  req.on('data', (chunk) => {
+    uploadedBytes += chunk.length;
+    const progress = totalBytes > 0 ? (uploadedBytes / totalBytes) * 100 : 0;
+    
+    // You could emit progress events here if using WebSockets
+    console.log(`📤 Upload progress: ${progress.toFixed(1)}%`);
+  });
+
+  req.on('end', () => {
+    console.log('📤 Upload completed');
+  });
+
+  next();
 });
 
-// Upload and convert PowerPoint endpoint
+// Health check endpoint
+app.get('/', (req, res) => {
+  res.send('PowerPoint Conversion Server v1.6 is running');
+});
+
+// FIXED: Upload and convert PowerPoint endpoint with proper database persistence
 app.post('/convert', upload.single('presentation'), async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: 'No file uploaded' });
   }
   
-  console.log(`Received file: ${req.file.originalname} (${req.file.size} bytes)`);
+  console.log(`📁 Received file: ${req.file.originalname} (${req.file.size} bytes)`);
   
   const inputFile = req.file.path;
   const presentationId = uuidv4();
@@ -190,6 +271,9 @@ app.post('/convert', upload.single('presentation'), async (req, res) => {
   const authorId = req.body.authorId || uuidv4();
   const topics = req.body.topics ? (Array.isArray(req.body.topics) ? req.body.topics : [req.body.topics]) : [];
   
+  console.log(`🎯 Processing presentation: "${title}" by ${author}`);
+  console.log(`🏷️  Topics: [${topics.join(', ')}]`);
+  
   // Initialize presentation data object
   const presentation = {
     id: presentationId,
@@ -200,56 +284,9 @@ app.post('/convert', upload.single('presentation'), async (req, res) => {
     authorId: authorId,
     topics: topics,
     converted: new Date(),
-    viewCount: 0
+    viewCount: 0,
+    isDeleted: false
   };
-  
-  // Helper function to save to database BEFORE responding
-  async function saveAndRespond(presentationData, slideData) {
-    try {
-      console.log(`Attempting to save presentation ${presentationData.id} to database...`);
-      
-      // Save to MongoDB FIRST
-      const presentationDoc = new Presentation(presentationData);
-      const savedDoc = await presentationDoc.save();
-      console.log(`✅ Successfully saved presentation ${presentationData.id} to database`);
-      
-      // Add to memory cache only after successful DB save
-      presentations[presentationData.id] = presentationData;
-      
-      // Add presentation to topic indexes (memory cache)
-      topics.forEach(topic => {
-        topic = topic.toLowerCase();
-        if (!presentationsByTopic[topic]) {
-          presentationsByTopic[topic] = [];
-        }
-        presentationsByTopic[topic].push(presentationId);
-      });
-      
-      // NOW send success response
-      res.json({
-        id: presentationData.id,
-        originalName: presentationData.originalName,
-        title: presentationData.title,
-        slideCount: slideData.slideCount,
-        slides: slideData.slides,
-        slideTexts: slideData.slideTexts,
-        status: slideData.status || "success",
-        message: slideData.message,
-        topics: presentationData.topics
-      });
-      
-    } catch (error) {
-      console.error(`❌ CRITICAL: Failed to save presentation to database: ${error}`);
-      
-      // Send error response instead of fake success
-      res.status(500).json({
-        error: "Failed to save presentation to database",
-        details: error.message,
-        id: presentationData.id,
-        status: "database_error"
-      });
-    }
-  }
   
   // Create output directory
   if (!fs.existsSync(outputDir)) {
@@ -260,13 +297,13 @@ app.post('/convert', upload.single('presentation'), async (req, res) => {
   const libreOfficeInstalled = checkLibreOfficeInstallation();
   
   if (!libreOfficeInstalled) {
-    console.log('LibreOffice not found. Creating placeholder images...');
+    console.log('⚠️  LibreOffice not found. Creating placeholder images...');
     
     // Try to install LibreOffice
     try {
-      console.log('Attempting to install LibreOffice...');
+      console.log('📦 Attempting to install LibreOffice...');
       execSync('apt-get update && apt-get install -y libreoffice poppler-utils imagemagick', { stdio: 'inherit' });
-      console.log('LibreOffice installation completed. Retrying conversion...');
+      console.log('✅ LibreOffice installation completed. Retrying conversion...');
       
       // Check if installation succeeded
       const installSucceeded = checkLibreOfficeInstallation();
@@ -274,7 +311,7 @@ app.post('/convert', upload.single('presentation'), async (req, res) => {
         throw new Error('LibreOffice still not available after installation attempt');
       }
     } catch (installError) {
-      console.error('Failed to install LibreOffice:', installError.message);
+      console.error('❌ Failed to install LibreOffice:', installError.message);
       
       // Create placeholder slides as fallback
       const placeholderCount = 5;
@@ -294,46 +331,91 @@ app.post('/convert', upload.single('presentation'), async (req, res) => {
       presentation.slideTexts = slideTexts;
       presentation.isPlaceholder = true;
       
-      // Save to database BEFORE responding
-      await saveAndRespond(presentation, {
-        slideCount: placeholderCount,
-        slides: placeholderUrls,
-        slideTexts: slideTexts,
-        status: "placeholders_created",
-        message: "LibreOffice is not available. Generated placeholder slides instead."
+      // CRITICAL FIX: Save to database and verify before responding
+      try {
+        console.log(`💾 Saving placeholder presentation to database...`);
+        const savedPresentation = await saveToDatabase(presentation);
+        
+        // Verify the save worked
+        const verified = await verifyDatabaseSave(presentationId);
+        if (!verified) {
+          throw new Error('Database verification failed');
+        }
+        
+        // Add to memory cache only after successful database save
+        presentations[presentationId] = savedPresentation;
+        
+        // Add presentation to topic indexes
+        topics.forEach(topic => {
+          topic = topic.toLowerCase();
+          if (!presentationsByTopic[topic]) {
+            presentationsByTopic[topic] = [];
+          }
+          presentationsByTopic[topic].push(presentationId);
+        });
+        
+        console.log(`✅ Successfully saved and verified placeholder presentation ${presentationId}`);
+        
+        // Send success response
+        res.json({
+          id: presentationId,
+          originalName: req.file.originalname,
+          title: title,
+          slideCount: placeholderCount,
+          slides: placeholderUrls,
+          slideTexts: slideTexts,
+          status: "placeholders_created",
+          message: "LibreOffice is not available. Generated placeholder slides instead.",
+          topics: topics
+        });
+        
+      } catch (dbError) {
+        console.error(`❌ CRITICAL: Failed to save placeholder presentation to database: ${dbError}`);
+        res.status(500).json({
+          error: "Failed to save presentation to database",
+          details: dbError.message,
+          id: presentationId,
+          status: "database_error"
+        });
+      }
+      
+      // Clean up uploaded file
+      fs.unlink(inputFile, (err) => {
+        if (err) console.error(`❌ Error deleting uploaded file: ${err.message}`);
       });
+      
       return;
     }
   }
   
-  console.log(`Converting PowerPoint to JPG images in ${outputDir}`);
+  console.log(`🔄 Converting PowerPoint to JPG images in ${outputDir}`);
   
   // Try to install PDF utilities if not already installed
   try {
-    console.log('Installing PDF utilities...');
+    console.log('📦 Installing PDF utilities...');
     execSync('apt-get update && apt-get install -y poppler-utils imagemagick', { stdio: 'inherit' });
-    console.log('PDF utilities installation completed.');
+    console.log('✅ PDF utilities installation completed.');
   } catch (error) {
-    console.error('Failed to install PDF utilities:', error.message);
+    console.error('❌ Failed to install PDF utilities:', error.message);
   }
   
   // First, convert to PDF which should preserve all slides
   const pdfCmd = `libreoffice --headless --convert-to pdf --outdir ${outputDir} ${inputFile}`;
-  console.log(`Executing PDF conversion: ${pdfCmd}`);
+  console.log(`🔄 Executing PDF conversion: ${pdfCmd}`);
   
   exec(pdfCmd, async (error, stdout, stderr) => {
     if (error) {
-      console.error(`PDF conversion error: ${error.message}`);
+      console.error(`❌ PDF conversion error: ${error.message}`);
       await fallbackToJpgConversion();
       return;
     }
     
-    console.log(`PDF conversion output: ${stdout}`);
+    console.log(`✅ PDF conversion output: ${stdout}`);
     
     // Check if PDF was created
     fs.readdir(outputDir, async (err, files) => {
       if (err) {
-        console.error(`Error reading output directory: ${err.message}`);
+        console.error(`❌ Error reading output directory: ${err.message}`);
         await fallbackToJpgConversion();
         return;
       }
@@ -342,7 +424,7 @@ app.post('/convert', upload.single('presentation'), async (req, res) => {
       const pdfFiles = files.filter(file => file.endsWith('.pdf'));
       
       if (pdfFiles.length === 0) {
-        console.log('No PDF files were generated. Falling back to JPG conversion...');
+        console.log('⚠️  No PDF files were generated. Falling back to JPG conversion...');
         await fallbackToJpgConversion();
         return;
       }
@@ -357,7 +439,7 @@ app.post('/convert', upload.single('presentation'), async (req, res) => {
         const pageCountMatch = pdfInfoOutput.match(/Pages:\s+(\d+)/);
         const pageCount = pageCountMatch ? parseInt(pageCountMatch[1]) : 0;
         
-        console.log(`PDF has ${pageCount} pages`);
+        console.log(`📄 PDF has ${pageCount} pages`);
         
         if (pageCount > 0) {
           // Create directories for temporary files
@@ -419,32 +501,71 @@ app.post('/convert', upload.single('presentation'), async (req, res) => {
           presentation.slideTexts = slideTexts;
           presentation.isPlaceholder = false;
           
-          // Save to database BEFORE responding
-          await saveAndRespond(presentation, {
-            slideCount: renamedImageUrls.length,
-            slides: renamedImageUrls,
-            slideTexts: slideTexts
-          });
+          // CRITICAL FIX: Save to database and verify before responding
+          try {
+            console.log(`💾 Saving converted presentation to database...`);
+            const savedPresentation = await saveToDatabase(presentation);
+            
+            // Verify the save worked
+            const verified = await verifyDatabaseSave(presentationId);
+            if (!verified) {
+              throw new Error('Database verification failed');
+            }
+            
+            // Add to memory cache only after successful database save
+            presentations[presentationId] = savedPresentation;
+            
+            // Add presentation to topic indexes
+            topics.forEach(topic => {
+              topic = topic.toLowerCase();
+              if (!presentationsByTopic[topic]) {
+                presentationsByTopic[topic] = [];
+              }
+              presentationsByTopic[topic].push(presentationId);
+            });
+            
+            console.log(`✅ Successfully saved and verified converted presentation ${presentationId}`);
+            
+            // Send success response
+            res.json({
+              id: presentationId,
+              originalName: req.file.originalname,
+              title: title,
+              slideCount: renamedImageUrls.length,
+              slides: renamedImageUrls,
+              slideTexts: slideTexts,
+              topics: topics
+            });
+            
+          } catch (dbError) {
+            console.error(`❌ CRITICAL: Failed to save converted presentation to database: ${dbError}`);
+            res.status(500).json({
+              error: "Failed to save presentation to database",
+              details: dbError.message,
+              id: presentationId,
+              status: "database_error"
+            });
+          }
           
           // Clean up temporary files
           try {
             fs.rmSync(tempDir, { recursive: true, force: true });
           } catch (cleanupError) {
-            console.error(`Error cleaning up temp directory: ${cleanupError.message}`);
+            console.error(`❌ Error cleaning up temp directory: ${cleanupError.message}`);
           }
           
           // Clean up the uploaded file
           fs.unlink(inputFile, (err) => {
-            if (err) console.error(`Error deleting uploaded file: ${err.message}`);
+            if (err) console.error(`❌ Error deleting uploaded file: ${err.message}`);
           });
           
           return;
         } else {
-          console.log('PDF has no pages. Falling back to JPG conversion...');
+          console.log('⚠️  PDF has no pages. Falling back to JPG conversion...');
           await fallbackToJpgConversion();
         }
       } catch (pdfError) {
-        console.error(`Error processing PDF: ${pdfError.message}`);
+        console.error(`❌ Error processing PDF: ${pdfError.message}`);
         await fallbackToJpgConversion();
       }
     });
@@ -452,42 +573,42 @@ app.post('/convert', upload.single('presentation'), async (req, res) => {
   
   // Fallback function for JPG conversion if PDF route fails
   async function fallbackToJpgConversion() {
-    console.log('Falling back to direct JPG conversion...');
+    console.log('🔄 Falling back to direct JPG conversion...');
     
     // Use LibreOffice to convert PowerPoint to JPG
     const cmd = `libreoffice --headless --convert-to jpg:"draw_jpg_Export" --outdir ${outputDir} ${inputFile}`;
-    console.log(`Executing fallback command: ${cmd}`);
+    console.log(`🔄 Executing fallback command: ${cmd}`);
     
     exec(cmd, async (error, stdout, stderr) => {
       if (error) {
-        console.error(`Conversion error: ${error.message}`);
+        console.error(`❌ Conversion error: ${error.message}`);
         await createFallbackPlaceholders();
         return;
       }
       
-      console.log(`Conversion output: ${stdout}`);
+      console.log(`✅ Conversion output: ${stdout}`);
       
       // Get the generated images
       fs.readdir(outputDir, async (err, files) => {
         if (err) {
-          console.error(`Error reading output directory: ${err.message}`);
+          console.error(`❌ Error reading output directory: ${err.message}`);
           await createFallbackPlaceholders();
           return;
         }
         
         // Filter for JPG files and sort them
         let imageFiles = files.filter(file => file.endsWith('.jpg'));
-        console.log(`Found ${imageFiles.length} jpg files`);
+        console.log(`📸 Found ${imageFiles.length} jpg files`);
         
         // If no images were generated, create placeholders
         if (imageFiles.length === 0) {
-          console.log('No images were generated. Creating placeholders...');
+          console.log('⚠️  No images were generated. Creating placeholders...');
           await createFallbackPlaceholders();
           return;
         }
         
         // Rename files to match expected format (slide-1.jpg, slide-2.jpg, etc.)
-        console.log(`Renaming ${imageFiles.length} slide images to standard format`);
+        console.log(`🔄 Renaming ${imageFiles.length} slide images to standard format`);
         const renamedImageUrls = [];
         const slideTexts = [];
         
@@ -502,7 +623,7 @@ app.post('/convert', upload.single('presentation'), async (req, res) => {
             renamedImageUrls.push(`/slides/${presentationId}/${newFileName}`);
             slideTexts.push(`Slide ${index+1}`);
           } catch (error) {
-            console.error(`Error renaming file ${file}: ${error.message}`);
+            console.error(`❌ Error renaming file ${file}: ${error.message}`);
             // Use the original file as fallback
             renamedImageUrls.push(`/slides/${presentationId}/${file}`);
             slideTexts.push(`Slide ${index+1}`);
@@ -512,7 +633,7 @@ app.post('/convert', upload.single('presentation'), async (req, res) => {
         // Add distinct placeholders for multi-slide presentations
         // if only one slide was converted
         if (imageFiles.length === 1) {
-          console.log('Only one slide converted. Creating distinct placeholders...');
+          console.log('⚠️  Only one slide converted. Creating distinct placeholders...');
           
           // Use the estimated slide count from filename or default to 23
           const estimatedSlideCount = 23;
@@ -530,7 +651,7 @@ app.post('/convert', upload.single('presentation'), async (req, res) => {
               renamedImageUrls.push(`/slides/${presentationId}/${newFileName}`);
               slideTexts.push(`Slide ${slideNumber} (Placeholder)`);
             } catch (error) {
-              console.error(`Error creating slide ${slideNumber}: ${error.message}`);
+              console.error(`❌ Error creating slide ${slideNumber}: ${error.message}`);
             }
           }
         }
@@ -541,16 +662,55 @@ app.post('/convert', upload.single('presentation'), async (req, res) => {
         presentation.slideTexts = slideTexts;
         presentation.isPlaceholder = false;
         
-        // Save to database BEFORE responding
-        await saveAndRespond(presentation, {
-          slideCount: renamedImageUrls.length,
-          slides: renamedImageUrls,
-          slideTexts: slideTexts
-        });
+        // CRITICAL FIX: Save to database and verify before responding
+        try {
+          console.log(`💾 Saving fallback presentation to database...`);
+          const savedPresentation = await saveToDatabase(presentation);
+          
+          // Verify the save worked
+          const verified = await verifyDatabaseSave(presentationId);
+          if (!verified) {
+            throw new Error('Database verification failed');
+          }
+          
+          // Add to memory cache only after successful database save
+          presentations[presentationId] = savedPresentation;
+          
+          // Add presentation to topic indexes
+          topics.forEach(topic => {
+            topic = topic.toLowerCase();
+            if (!presentationsByTopic[topic]) {
+              presentationsByTopic[topic] = [];
+            }
+            presentationsByTopic[topic].push(presentationId);
+          });
+          
+          console.log(`✅ Successfully saved and verified fallback presentation ${presentationId}`);
+          
+          // Send success response
+          res.json({
+            id: presentationId,
+            originalName: req.file.originalname,
+            title: title,
+            slideCount: renamedImageUrls.length,
+            slides: renamedImageUrls,
+            slideTexts: slideTexts,
+            topics: topics
+          });
+          
+        } catch (dbError) {
+          console.error(`❌ CRITICAL: Failed to save fallback presentation to database: ${dbError}`);
+          res.status(500).json({
+            error: "Failed to save presentation to database",
+            details: dbError.message,
+            id: presentationId,
+            status: "database_error"
+          });
+        }
         
         // Clean up the uploaded file
         fs.unlink(inputFile, (err) => {
-          if (err) console.error(`Error deleting uploaded file: ${err.message}`);
+          if (err) console.error(`❌ Error deleting uploaded file: ${err.message}`);
         });
       });
     });
@@ -576,80 +736,72 @@ app.post('/convert', upload.single('presentation'), async (req, res) => {
     presentation.slideTexts = slideTexts;
     presentation.isPlaceholder = true;
     
-    // Save to database BEFORE responding
-    await saveAndRespond(presentation, {
-      slideCount: estimatedSlideCount,
-      slides: placeholderUrls,
-      slideTexts: slideTexts,
-      status: "fallback_placeholders",
-      message: "Conversion failed. Generated distinct placeholder slides instead."
-    });
+    // CRITICAL FIX: Save to database and verify before responding
+    try {
+      console.log(`💾 Saving final fallback presentation to database...`);
+      const savedPresentation = await saveToDatabase(presentation);
+      
+      // Verify the save worked
+      const verified = await verifyDatabaseSave(presentationId);
+      if (!verified) {
+        throw new Error('Database verification failed');
+      }
+      
+      // Add to memory cache only after successful database save
+      presentations[presentationId] = savedPresentation;
+      
+      // Add presentation to topic indexes
+      topics.forEach(topic => {
+        topic = topic.toLowerCase();
+        if (!presentationsByTopic[topic]) {
+          presentationsByTopic[topic] = [];
+        }
+        presentationsByTopic[topic].push(presentationId);
+      });
+      
+      console.log(`✅ Successfully saved and verified final fallback presentation ${presentationId}`);
+      
+      // Send success response
+      res.json({
+        id: presentationId,
+        originalName: req.file.originalname,
+        title: title,
+        slideCount: estimatedSlideCount,
+        slides: placeholderUrls,
+        slideTexts: slideTexts,
+        status: "fallback_placeholders",
+        message: "Conversion failed. Generated distinct placeholder slides instead.",
+        topics: topics
+      });
+      
+    } catch (dbError) {
+      console.error(`❌ CRITICAL: Failed to save final fallback presentation to database: ${dbError}`);
+      res.status(500).json({
+        error: "Failed to save presentation to database",
+        details: dbError.message,
+        id: presentationId,
+        status: "database_error"
+      });
+    }
     
     // Clean up the uploaded file
     fs.unlink(inputFile, (err) => {
-      if (err) console.error(`Error deleting uploaded file: ${err.message}`);
+      if (err) console.error(`❌ Error deleting uploaded file: ${err.message}`);
     });
   }
 });
 
-// Simplified: Forward the metadata to the convert endpoint
-app.post('/presentations', upload.single('presentation'), (req, res) => {
-  if (!req.file) {
-    return res.status(400).json({ error: 'No file uploaded' });
-  }
-  
-  app.handle({
-    method: 'POST',
-    url: '/convert',
-    headers: req.headers,
-    body: req.body,
-    file: req.file
-  }, res);
-});
-
-// Add this endpoint to server.js (around line 400, with other presentation endpoints)
-app.put('/presentation/:id', async (req, res) => {
-  const presentationId = req.params.id;
-  const { title, summary, author, topics } = req.body;
-  
-  try {
-    // Update in MongoDB
-    const result = await Presentation.findOneAndUpdate(
-      { id: presentationId, isDeleted: false },
-      {
-        $set: {
-          title: title || undefined,
-          summary: summary || undefined,
-          author: author || undefined,
-          topics: topics || undefined
-        }
-      },
-      { new: true }
-    );
-    
-    if (!result) {
-      return res.status(404).json({ error: 'Presentation not found' });
-    }
-    
-    // Update memory cache
-    if (presentations[presentationId]) {
-      presentations[presentationId] = result.toObject();
-    }
-    
-    res.json({ success: true, presentation: result });
-  } catch (err) {
-    console.error(`Error updating presentation: ${err}`);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-// Get presentation info endpoint
+// FIXED: Get presentation info endpoint with proper database queries
 app.get('/presentation/:id', async (req, res) => {
   const presentationId = req.params.id;
   const userId = req.query.userId; // Optional user ID for tracking
   
+  console.log(`📊 Getting presentation: ${presentationId}`);
+  
   // First try to get from memory cache
   if (presentations[presentationId]) {
+    console.log(`✅ Found presentation ${presentationId} in memory cache`);
+    
     // Track this view if userId is provided
     if (userId) {
       // Initialize user history if needed
@@ -667,7 +819,7 @@ app.get('/presentation/:id', async (req, res) => {
         { id: presentationId },
         { $inc: { viewCount: 1 } }
       ).catch(err => {
-        console.error(`Error updating view count in database: ${err}`);
+        console.error(`❌ Error updating view count in database: ${err}`);
       });
     }
     
@@ -676,11 +828,15 @@ app.get('/presentation/:id', async (req, res) => {
   
   // If not in memory, try to get from database
   try {
+    console.log(`🔍 Searching database for presentation: ${presentationId}`);
     const dbPresentation = await Presentation.findOne({ id: presentationId, isDeleted: false });
     
     if (!dbPresentation) {
+      console.log(`❌ Presentation ${presentationId} not found in database`);
       return res.status(404).json({ error: 'Presentation not found' });
     }
+    
+    console.log(`✅ Found presentation ${presentationId} in database`);
     
     // Add to memory cache
     const presentation = dbPresentation.toObject();
@@ -714,12 +870,190 @@ app.get('/presentation/:id', async (req, res) => {
     
     return res.json(presentation);
   } catch (err) {
-    console.error(`Error fetching presentation from database: ${err}`);
+    console.error(`❌ Error fetching presentation from database: ${err}`);
     return res.status(500).json({ error: 'Database error' });
   }
 });
 
-// Simplified slide redirection
+// FIXED: Get list of presentations with proper database queries
+app.get('/presentations', async (req, res) => {
+  console.log(`📚 Getting all presentations...`);
+  
+  try {
+    // Get presentations from database
+    const dbPresentations = await Presentation.find(
+      { isDeleted: false },
+      'id originalName title summary author topics slideCount converted isPlaceholder viewCount'
+    );
+    
+    console.log(`✅ Found ${dbPresentations.length} presentations in database`);
+    
+    const presentationList = dbPresentations.map(p => p.toObject());
+    
+    // Update memory cache
+    presentationList.forEach(p => {
+      presentations[p.id] = p;
+      
+      // Update topic indexes
+      (p.topics || []).forEach(topic => {
+        topic = topic.toLowerCase();
+        if (!presentationsByTopic[topic]) {
+          presentationsByTopic[topic] = [];
+        }
+        if (!presentationsByTopic[topic].includes(p.id)) {
+          presentationsByTopic[topic].push(p.id);
+        }
+      });
+    });
+    
+    console.log(`📊 Memory cache updated with ${Object.keys(presentations).length} presentations`);
+    
+    res.json({ presentations: presentationList });
+  } catch (err) {
+    console.error(`❌ Error getting presentations: ${err}`);
+    
+    // Fallback to memory cache if database fails
+    const presentationList = Object.values(presentations).map(p => ({
+      id: p.id,
+      originalName: p.originalName,
+      title: p.title || p.originalName,
+      summary: p.summary || "",
+      author: p.author || "Anonymous",
+      topics: p.topics || [],
+      slideCount: p.slideCount,
+      converted: p.converted,
+      isPlaceholder: p.isPlaceholder || false,
+      viewCount: p.viewCount || 0
+    }));
+    
+    console.log(`⚠️  Using memory cache fallback: ${presentationList.length} presentations`);
+    
+    res.json({ presentations: presentationList });
+  }
+});
+
+// Simplified: Forward the metadata to the convert endpoint
+app.post('/presentations', upload.single('presentation'), (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ error: 'No file uploaded' });
+  }
+  
+  // Forward to the convert endpoint
+  req.url = '/convert';
+  app._router.handle(req, res);
+});
+
+// Update presentation endpoint
+app.put('/presentation/:id', async (req, res) => {
+  const presentationId = req.params.id;
+  const { title, summary, author, topics } = req.body;
+  
+  console.log(`🔄 Updating presentation: ${presentationId}`);
+  
+  try {
+    // Update in MongoDB
+    const result = await Presentation.findOneAndUpdate(
+      { id: presentationId, isDeleted: false },
+      {
+        $set: {
+          title: title || undefined,
+          summary: summary || undefined,
+          author: author || undefined,
+          topics: topics || undefined
+        }
+      },
+      { new: true }
+    );
+    
+    if (!result) {
+      console.log(`❌ Presentation ${presentationId} not found for update`);
+      return res.status(404).json({ error: 'Presentation not found' });
+    }
+    
+    console.log(`✅ Successfully updated presentation ${presentationId} in database`);
+    
+    // Update memory cache
+    if (presentations[presentationId]) {
+      presentations[presentationId] = result.toObject();
+      console.log(`✅ Updated presentation ${presentationId} in memory cache`);
+    }
+    
+    res.json({ success: true, presentation: result });
+  } catch (err) {
+    console.error(`❌ Error updating presentation: ${err}`);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Get presentations by topic
+app.get('/presentations/topic/:topic', async (req, res) => {
+  const topic = req.params.topic.toLowerCase();
+  console.log(`🏷️  Getting presentations for topic: ${topic}`);
+  
+  try {
+    // Query database directly
+    const dbPresentations = await Presentation.find({
+      topics: { $elemMatch: { $regex: new RegExp(topic, 'i') } },
+      isDeleted: false
+    });
+    
+    console.log(`✅ Found ${dbPresentations.length} presentations for topic '${topic}' in database`);
+    
+    if (dbPresentations.length > 0) {
+      const topicPresentations = dbPresentations.map(p => p.toObject());
+      
+      // Update memory cache
+      topicPresentations.forEach(pres => {
+        presentations[pres.id] = pres;
+        
+        // Update topic indexes
+        (pres.topics || []).forEach(t => {
+          const normalizedTopic = t.toLowerCase();
+          if (!presentationsByTopic[normalizedTopic]) {
+            presentationsByTopic[normalizedTopic] = [];
+          }
+          if (!presentationsByTopic[normalizedTopic].includes(pres.id)) {
+            presentationsByTopic[normalizedTopic].push(pres.id);
+          }
+        });
+      });
+      
+      return res.json({ presentations: topicPresentations });
+    }
+    
+    // If not found in database, check memory cache as fallback
+    if (presentationsByTopic[topic] && presentationsByTopic[topic].length > 0) {
+      const topicPresentations = presentationsByTopic[topic]
+        .map(id => presentations[id])
+        .filter(p => p !== undefined);
+      
+      console.log(`⚠️  Using memory cache fallback for topic '${topic}': ${topicPresentations.length} presentations`);
+      
+      return res.json({ presentations: topicPresentations });
+    }
+    
+    // If not found anywhere
+    console.log(`📭 No presentations found for topic '${topic}'`);
+    return res.json({ presentations: [] });
+  } catch (err) {
+    console.error(`❌ Error getting presentations by topic: ${err}`);
+    
+    // Fallback to memory cache if database fails
+    if (presentationsByTopic[topic]) {
+      const topicPresentations = presentationsByTopic[topic]
+        .map(id => presentations[id])
+        .filter(p => p !== undefined);
+      
+      console.log(`⚠️  Database error, using memory cache for topic '${topic}': ${topicPresentations.length} presentations`);
+      
+      return res.json({ presentations: topicPresentations });
+    }
+    
+    res.json({ presentations: [] });
+  }
+});
+
+// Slide access endpoint
 app.get('/slides/:presentationId/:slideNumber', (req, res) => {
   const { presentationId, slideNumber } = req.params;
   const slideIndex = parseInt(slideNumber) - 1; // Convert to zero-based index
@@ -752,184 +1086,9 @@ app.get('/slides/:presentationId/:slideNumber', (req, res) => {
       res.redirect(slidePath);
     })
     .catch(err => {
-      console.error(`Error fetching slide: ${err}`);
+      console.error(`❌ Error fetching slide: ${err}`);
       res.status(500).json({ error: 'Database error' });
     });
-});
-
-// Get list of presentations
-app.get('/presentations', async (req, res) => {
-  try {
-    // Get presentations from database
-    const dbPresentations = await Presentation.find(
-      { isDeleted: false },
-      'id originalName title summary author topics slideCount converted isPlaceholder viewCount'
-    );
-    
-    const presentationList = dbPresentations.map(p => p.toObject());
-    
-    // Update memory cache
-    presentationList.forEach(p => {
-      presentations[p.id] = p;
-      
-      // Update topic indexes
-      (p.topics || []).forEach(topic => {
-        topic = topic.toLowerCase();
-        if (!presentationsByTopic[topic]) {
-          presentationsByTopic[topic] = [];
-        }
-        if (!presentationsByTopic[topic].includes(p.id)) {
-          presentationsByTopic[topic].push(p.id);
-        }
-      });
-    });
-    
-    res.json({ presentations: presentationList });
-  } catch (err) {
-    console.error(`Error getting presentations: ${err}`);
-    
-    // Fallback to memory cache if database fails
-    const presentationList = Object.values(presentations).map(p => ({
-      id: p.id,
-      originalName: p.originalName,
-      title: p.title || p.originalName,
-      summary: p.summary || "",
-      author: p.author || "Anonymous",
-      topics: p.topics || [],
-      slideCount: p.slideCount,
-      converted: p.converted,
-      isPlaceholder: p.isPlaceholder || false,
-      viewCount: p.viewCount || 0
-    }));
-    
-    res.json({ presentations: presentationList });
-  }
-});
-
-// Update presentation endpoint
-app.put('/presentation/:id', async (req, res) => {
-  const presentationId = req.params.id;
-  const { title, summary, author, topics } = req.body;
-  
-  try {
-    // Update in database
-    const updatedPresentation = await Presentation.findOneAndUpdate(
-      { id: presentationId, isDeleted: false },
-      {
-        ...(title && { title }),
-        ...(summary && { summary }),
-        ...(author && { author }),
-        ...(topics && { topics })
-      },
-      { new: true }
-    );
-    
-    if (!updatedPresentation) {
-      return res.status(404).json({ error: 'Presentation not found' });
-    }
-    
-    // Update memory cache
-    if (presentations[presentationId]) {
-      presentations[presentationId] = {
-        ...presentations[presentationId],
-        ...(title && { title }),
-        ...(summary && { summary }),
-        ...(author && { author }),
-        ...(topics && { topics })
-      };
-      
-      console.log(`Updated presentation ${presentationId} in memory cache`);
-    }
-    
-    // Update topic indexes if topics changed
-    if (topics) {
-      // Remove from old topic indexes
-      Object.keys(presentationsByTopic).forEach(topic => {
-        presentationsByTopic[topic] = presentationsByTopic[topic].filter(id => id !== presentationId);
-      });
-      
-      // Add to new topic indexes
-      topics.forEach(topic => {
-        const topicLower = topic.toLowerCase();
-        if (!presentationsByTopic[topicLower]) {
-          presentationsByTopic[topicLower] = [];
-        }
-        if (!presentationsByTopic[topicLower].includes(presentationId)) {
-          presentationsByTopic[topicLower].push(presentationId);
-        }
-      });
-    }
-    
-    res.json({
-      success: true,
-      message: 'Presentation updated successfully',
-      presentation: updatedPresentation.toObject()
-    });
-    
-  } catch (err) {
-    console.error(`Error updating presentation: ${err}`);
-    res.status(500).json({ error: 'Database error' });
-  }
-});
-
-// Get presentations by topic
-app.get('/presentations/topic/:topic', async (req, res) => {
-  const topic = req.params.topic.toLowerCase();
-  
-  try {
-    // Query database directly
-    const dbPresentations = await Presentation.find({
-      topics: { $elemMatch: { $regex: new RegExp(topic, 'i') } },
-      isDeleted: false
-    });
-    
-    if (dbPresentations.length > 0) {
-      const topicPresentations = dbPresentations.map(p => p.toObject());
-      
-      // Update memory cache
-      topicPresentations.forEach(pres => {
-        presentations[pres.id] = pres;
-        
-        // Update topic indexes
-        (pres.topics || []).forEach(t => {
-          const normalizedTopic = t.toLowerCase();
-          if (!presentationsByTopic[normalizedTopic]) {
-            presentationsByTopic[normalizedTopic] = [];
-          }
-          if (!presentationsByTopic[normalizedTopic].includes(pres.id)) {
-            presentationsByTopic[normalizedTopic].push(pres.id);
-          }
-        });
-      });
-      
-      return res.json({ presentations: topicPresentations });
-    }
-    
-    // If not found in database, check memory cache as fallback
-    if (presentationsByTopic[topic] && presentationsByTopic[topic].length > 0) {
-      const topicPresentations = presentationsByTopic[topic]
-        .map(id => presentations[id])
-        .filter(p => p !== undefined);
-      
-      return res.json({ presentations: topicPresentations });
-    }
-    
-    // If not found anywhere
-    return res.json({ presentations: [] });
-  } catch (err) {
-    console.error(`Error getting presentations by topic: ${err}`);
-    
-    // Fallback to memory cache if database fails
-    if (presentationsByTopic[topic]) {
-      const topicPresentations = presentationsByTopic[topic]
-        .map(id => presentations[id])
-        .filter(p => p !== undefined);
-      
-      return res.json({ presentations: topicPresentations });
-    }
-    
-    res.json({ presentations: [] });
-  }
 });
 
 // User-presentation interaction APIs
@@ -993,7 +1152,7 @@ app.get('/user/:userId/unseen/:topic', async (req, res) => {
     
     return res.json({ presentations: [] });
   } catch (err) {
-    console.error(`Error getting unseen presentations: ${err}`);
+    console.error(`❌ Error getting unseen presentations: ${err}`);
     
     // Fallback to memory cache if database fails
     if (presentationsByTopic[topicLower]) {
@@ -1028,6 +1187,8 @@ app.post('/user/:userId/seen/:presentationId', (req, res) => {
 app.delete('/presentation/:id', async (req, res) => {
   const presentationId = req.params.id;
   
+  console.log(`🗑️  Deleting presentation: ${presentationId}`);
+  
   try {
     // Mark as deleted in database
     const result = await Presentation.findOneAndUpdate(
@@ -1037,8 +1198,11 @@ app.delete('/presentation/:id', async (req, res) => {
     );
     
     if (!result) {
+      console.log(`❌ Presentation ${presentationId} not found for deletion`);
       return res.status(404).json({ error: 'Presentation not found' });
     }
+    
+    console.log(`✅ Successfully marked presentation ${presentationId} as deleted in database`);
     
     // Remove from memory cache
     if (presentations[presentationId]) {
@@ -1052,6 +1216,7 @@ app.delete('/presentation/:id', async (req, res) => {
       });
       
       delete presentations[presentationId];
+      console.log(`✅ Removed presentation ${presentationId} from memory cache`);
     }
     
     // Remove from user history
@@ -1061,7 +1226,7 @@ app.delete('/presentation/:id', async (req, res) => {
     
     res.json({ success: true, message: 'Presentation deleted' });
   } catch (err) {
-    console.error(`Error deleting presentation: ${err}`);
+    console.error(`❌ Error deleting presentation: ${err}`);
     
     // Fallback to memory-only delete if database fails
     if (presentations[presentationId]) {
@@ -1115,7 +1280,7 @@ app.get('/topics', async (req, res) => {
       }))
     });
   } catch (err) {
-    console.error(`Error getting topics: ${err}`);
+    console.error(`❌ Error getting topics: ${err}`);
     
     // Fallback to in-memory topics
     res.json({
@@ -1127,29 +1292,87 @@ app.get('/topics', async (req, res) => {
   }
 });
 
-// Database status endpoint - simplified for production use
+// ENHANCED Database status endpoint with detailed diagnostics
 app.get('/status', async (req, res) => {
   try {
+    const dbConnected = mongoose.connection.readyState === 1;
+    const dbPresentationCount = dbConnected ? await Presentation.countDocuments({ isDeleted: false }) : 0;
+    const memoryPresentationCount = Object.keys(presentations).length;
+    
+    // Get sample presentation IDs from both sources
+    const sampleDbIds = dbConnected ?
+      (await Presentation.find({ isDeleted: false }, 'id').limit(5)).map(p => p.id) : [];
+    const sampleMemoryIds = Object.keys(presentations).slice(0, 5);
+    
     const dbStatus = {
-      connected: mongoose.connection.readyState === 1,
-      presentationCount: await Presentation.countDocuments({ isDeleted: false }),
-      memoryPresentationCount: Object.keys(presentations).length,
-      version: "1.5"
+      connected: dbConnected,
+      presentationCount: dbPresentationCount,
+      memoryPresentationCount: memoryPresentationCount,
+      version: "1.6",
+      syncStatus: dbPresentationCount === memoryPresentationCount ? "synced" : "out_of_sync",
+      sampleDatabaseIds: sampleDbIds,
+      sampleMemoryIds: sampleMemoryIds,
+      mongoUri: mongoUri.replace(/\/\/.*:.*@/, '//***:***@'), // Hide credentials
+      timestamp: new Date().toISOString()
     };
+    
+    console.log(`📊 Status check: DB(${dbPresentationCount}) Memory(${memoryPresentationCount}) Connected(${dbConnected})`);
     
     res.json(dbStatus);
   } catch (err) {
+    console.error(`❌ Status check error: ${err}`);
     res.status(500).json({
       error: 'Database error',
       message: err.message,
-      connected: mongoose.connection.readyState === 1
+      connected: mongoose.connection.readyState === 1,
+      version: "1.6"
     });
   }
 });
 
+// MANUAL DATABASE SYNC ENDPOINT for troubleshooting
+app.post('/admin/sync', async (req, res) => {
+  try {
+    console.log(`🔄 Manual sync requested...`);
+    
+    // Clear memory cache
+    Object.keys(presentations).forEach(key => delete presentations[key]);
+    Object.keys(presentationsByTopic).forEach(key => delete presentationsByTopic[key]);
+    
+    // Reload from database
+    await loadPresentationsFromDatabase();
+    
+    const memoryCount = Object.keys(presentations).length;
+    const dbCount = await Presentation.countDocuments({ isDeleted: false });
+    
+    console.log(`✅ Manual sync completed: ${memoryCount} presentations loaded`);
+    
+    res.json({
+      success: true,
+      message: `Sync completed: ${memoryCount} presentations loaded from database`,
+      databaseCount: dbCount,
+      memoryCount: memoryCount
+    });
+    
+  } catch (err) {
+    console.error(`❌ Manual sync error: ${err}`);
+    res.status(500).json({
+      error: 'Sync failed',
+      message: err.message
+    });
+  }
+});
+
+// Progress tracking endpoint for uploads
+app.get('/upload-progress/:id', (req, res) => {
+  // This would be implemented with WebSockets or Server-Sent Events in a full implementation
+  // For now, just return a placeholder
+  res.json({ progress: 0, status: 'waiting' });
+});
+
 // Error handler
 app.use((err, req, res, next) => {
-  console.error(err.stack);
+  console.error(`❌ Server error: ${err.stack}`);
   res.status(500).json({ error: err.message || 'Something went wrong!' });
 });
 
@@ -1158,36 +1381,38 @@ mongoose.connect(mongoUri, {
   useNewUrlParser: true,
   useUnifiedTopology: true
 }).then(() => {
-  console.log('Connected to MongoDB database');
+  console.log('✅ Connected to MongoDB database');
   
   // Load presentations from database on startup
-  loadPresentationsFromDatabase();
+  loadPresentationsFromDatabase().then(() => {
+    console.log(`🚀 Server startup complete with ${Object.keys(presentations).length} presentations loaded`);
+  });
   
   // Start the server
   app.listen(port, () => {
-    console.log(`PowerPoint Conversion Server (v1.5 with MongoDB) running on port ${port}`);
+    console.log(`🚀 PowerPoint Conversion Server (v1.6 with FIXED MongoDB) running on port ${port}`);
     
     // Check if LibreOffice is installed
     const libreOfficeInstalled = checkLibreOfficeInstallation();
     if (!libreOfficeInstalled) {
-      console.error('WARNING: LibreOffice is not installed. Conversion functionality will not work!');
+      console.error('⚠️  WARNING: LibreOffice is not installed. Conversion functionality will not work!');
       
       // Try to install LibreOffice and PDF utilities
       try {
-        console.log('Attempting to install LibreOffice and PDF utilities on server startup...');
+        console.log('📦 Attempting to install LibreOffice and PDF utilities on server startup...');
         execSync('apt-get update && apt-get install -y libreoffice poppler-utils imagemagick', { stdio: 'inherit' });
-        console.log('Installation completed.');
+        console.log('✅ Installation completed.');
       } catch (installError) {
-        console.error('Failed to automatically install LibreOffice:', installError.message);
+        console.error('❌ Failed to automatically install LibreOffice:', installError.message);
       }
     }
   });
 }).catch(err => {
-  console.error(`Failed to connect to MongoDB: ${err}`);
-  console.warn('Running without database persistence. Presentations will be lost on restart!');
+  console.error(`❌ Failed to connect to MongoDB: ${err}`);
+  console.warn('⚠️  Running without database persistence. Presentations will be lost on restart!');
   
   // Start the server anyway, but without database functionality
   app.listen(port, () => {
-    console.log(`PowerPoint Conversion Server (v1.5 fallback mode) running on port ${port}`);
+    console.log(`🚀 PowerPoint Conversion Server (v1.6 fallback mode) running on port ${port}`);
   });
 });
