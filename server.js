@@ -837,7 +837,21 @@ app.get('/presentation/:id', async (req, res) => {
       });
     }
     
-    return res.json(presentations[presentationId]);
+    // CRITICAL FIX: Ensure slides array is included
+    const presentationData = { ...presentations[presentationId] };
+    
+    // Add slide URLs if they don't exist
+    if (!presentationData.slides || presentationData.slides.length === 0) {
+      console.log(`🔗 Generating slide URLs for presentation ${presentationId}`);
+      const slideURLs = [];
+      for (let i = 1; i <= presentationData.slideCount; i++) {
+        slideURLs.push(`/slides/${presentationId}/slide-${i}.jpg`);
+      }
+      presentationData.slides = slideURLs;
+      console.log(`🔗 Generated ${slideURLs.length} slide URLs`);
+    }
+    
+    return res.json(presentationData);
   }
   
   // If not in memory, try to get from database
@@ -853,11 +867,23 @@ app.get('/presentation/:id', async (req, res) => {
     console.log(`✅ Found presentation ${presentationId} in database`);
     
     // Add to memory cache
-    const presentation = dbPresentation.toObject();
-    presentations[presentationId] = presentation;
+    const presentationData = dbPresentation.toObject();
+    
+    // CRITICAL FIX: Ensure slides array is included
+    if (!presentationData.slides || presentationData.slides.length === 0) {
+      console.log(`🔗 Generating slide URLs for presentation ${presentationId}`);
+      const slideURLs = [];
+      for (let i = 1; i <= presentationData.slideCount; i++) {
+        slideURLs.push(`/slides/${presentationId}/slide-${i}.jpg`);
+      }
+      presentationData.slides = slideURLs;
+      console.log(`🔗 Generated ${slideURLs.length} slide URLs`);
+    }
+    
+    presentations[presentationId] = presentationData;
     
     // Update topic indexes
-    (presentation.topics || []).forEach(topic => {
+    (presentationData.topics || []).forEach(topic => {
       topic = topic.toLowerCase();
       if (!presentationsByTopic[topic]) {
         presentationsByTopic[topic] = [];
@@ -882,7 +908,7 @@ app.get('/presentation/:id', async (req, res) => {
       }
     }
     
-    return res.json(presentation);
+    return res.json(presentationData);
   } catch (err) {
     console.error(`❌ Error fetching presentation from database: ${err}`);
     return res.status(500).json({ error: 'Database error' });
