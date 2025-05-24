@@ -1,4 +1,4 @@
-// server.js - PowerPoint Conversion Server v 1.7 with FIXED MongoDB Persistence & working Slide urls
+// server.js - PowerPoint Conversion Server v 1.6 with FIXED MongoDB Persistence
 const express = require('express');
 const multer = require('multer');
 const fs = require('fs');
@@ -222,125 +222,9 @@ function createDistinctPlaceholder(outputPath, slideNumber, title) {
   }
 }
 
-// FIXED: Static file serving with debug logging
-app.use('/slides', (req, res, next) => {
-  console.log(`📸 Slide request: ${req.originalUrl}`);
-  console.log(`📂 Looking for file: ${path.join(__dirname, 'public', 'slides', req.path)}`);
-  
-  // Check if file exists
-  const filePath = path.join(__dirname, 'public', 'slides', req.path);
-  if (fs.existsSync(filePath)) {
-    console.log(`✅ File exists: ${filePath}`);
-  } else {
-    console.log(`❌ File NOT found: ${filePath}`);
-    
-    // List what files ARE in the directory
-    const dirPath = path.dirname(filePath);
-    if (fs.existsSync(dirPath)) {
-      try {
-        const filesInDir = fs.readdirSync(dirPath);
-        console.log(`📁 Files in ${dirPath}:`, filesInDir);
-      } catch (err) {
-        console.log(`❌ Could not read directory ${dirPath}:`, err.message);
-      }
-    } else {
-      console.log(`❌ Directory does not exist: ${dirPath}`);
-    }
-  }
-  
-  next();
-});
-
 // Serve static files from the public directory
 app.use('/slides', express.static(path.join(__dirname, 'public', 'slides')));
 app.use(express.static(path.join(__dirname, 'public')));
-
-// Debug endpoints
-app.get('/debug/slides/:presentationId', (req, res) => {
-  const presentationId = req.params.presentationId;
-  const slidesDir = path.join(__dirname, 'public', 'slides', presentationId);
-  
-  console.log(`🔍 Debug request for presentation: ${presentationId}`);
-  console.log(`🔍 Looking in directory: ${slidesDir}`);
-  
-  if (fs.existsSync(slidesDir)) {
-    try {
-      const files = fs.readdirSync(slidesDir);
-      console.log(`✅ Found ${files.length} files in slides directory`);
-      
-      res.json({
-        success: true,
-        presentationId: presentationId,
-        slidesDirectory: slidesDir,
-        filesFound: files.length,
-        files: files,
-        sampleUrls: files.slice(0, 5).map(file => `/slides/${presentationId}/${file}`),
-        firstFileFullPath: files.length > 0 ? path.join(slidesDir, files[0]) : null
-      });
-    } catch (err) {
-      console.error(`❌ Error reading slides directory: ${err}`);
-      res.status(500).json({
-        error: 'Could not read slides directory',
-        presentationId: presentationId,
-        directory: slidesDir,
-        errorMessage: err.message
-      });
-    }
-  } else {
-    console.log(`❌ Slides directory not found: ${slidesDir}`);
-    
-    // Check if parent directory exists
-    const parentDir = path.join(__dirname, 'public', 'slides');
-    if (fs.existsSync(parentDir)) {
-      const allPresentations = fs.readdirSync(parentDir);
-      res.status(404).json({
-        error: 'Slides directory not found for this presentation',
-        presentationId: presentationId,
-        expectedPath: slidesDir,
-        availablePresentations: allPresentations
-      });
-    } else {
-      res.status(404).json({
-        error: 'Slides parent directory not found',
-        presentationId: presentationId,
-        expectedPath: slidesDir,
-        parentDirectory: parentDir,
-        parentExists: false
-      });
-    }
-  }
-});
-
-app.get('/debug/filesystem', (req, res) => {
-  const publicDir = path.join(__dirname, 'public');
-  const slidesDir = path.join(__dirname, 'public', 'slides');
-  
-  const result = {
-    serverDirectory: __dirname,
-    publicDirectory: publicDir,
-    slidesDirectory: slidesDir,
-    publicExists: fs.existsSync(publicDir),
-    slidesExists: fs.existsSync(slidesDir)
-  };
-  
-  if (fs.existsSync(publicDir)) {
-    try {
-      result.publicContents = fs.readdirSync(publicDir);
-    } catch (err) {
-      result.publicError = err.message;
-    }
-  }
-  
-  if (fs.existsSync(slidesDir)) {
-    try {
-      result.slidesContents = fs.readdirSync(slidesDir);
-    } catch (err) {
-      result.slidesError = err.message;
-    }
-  }
-  
-  res.json(result);
-});
 
 // PROGRESS TRACKING MIDDLEWARE
 app.use('/convert', (req, res, next) => {
@@ -953,7 +837,21 @@ app.get('/presentation/:id', async (req, res) => {
       });
     }
     
-    return res.json(presentations[presentationId]);
+    // CRITICAL FIX: Ensure slides array is included
+    const presentationData = { ...presentations[presentationId] };
+    
+    // Add slide URLs if they don't exist
+    if (!presentationData.slides || presentationData.slides.length === 0) {
+      console.log(`🔗 Generating slide URLs for presentation ${presentationId}`);
+      const slideURLs = [];
+      for (let i = 1; i <= presentationData.slideCount; i++) {
+        slideURLs.push(`/slides/${presentationId}/slide-${i}.jpg`);
+      }
+      presentationData.slides = slideURLs;
+      console.log(`🔗 Generated ${slideURLs.length} slide URLs`);
+    }
+    
+    return res.json(presentationData);
   }
   
   // If not in memory, try to get from database
@@ -969,11 +867,23 @@ app.get('/presentation/:id', async (req, res) => {
     console.log(`✅ Found presentation ${presentationId} in database`);
     
     // Add to memory cache
-    const presentation = dbPresentation.toObject();
-    presentations[presentationId] = presentation;
+    const presentationData = dbPresentation.toObject();
+    
+    // CRITICAL FIX: Ensure slides array is included
+    if (!presentationData.slides || presentationData.slides.length === 0) {
+      console.log(`🔗 Generating slide URLs for presentation ${presentationId}`);
+      const slideURLs = [];
+      for (let i = 1; i <= presentationData.slideCount; i++) {
+        slideURLs.push(`/slides/${presentationId}/slide-${i}.jpg`);
+      }
+      presentationData.slides = slideURLs;
+      console.log(`🔗 Generated ${slideURLs.length} slide URLs`);
+    }
+    
+    presentations[presentationId] = presentationData;
     
     // Update topic indexes
-    (presentation.topics || []).forEach(topic => {
+    (presentationData.topics || []).forEach(topic => {
       topic = topic.toLowerCase();
       if (!presentationsByTopic[topic]) {
         presentationsByTopic[topic] = [];
@@ -998,7 +908,7 @@ app.get('/presentation/:id', async (req, res) => {
       }
     }
     
-    return res.json(presentation);
+    return res.json(presentationData);
   } catch (err) {
     console.error(`❌ Error fetching presentation from database: ${err}`);
     return res.status(500).json({ error: 'Database error' });
@@ -1181,6 +1091,44 @@ app.get('/presentations/topic/:topic', async (req, res) => {
     
     res.json({ presentations: [] });
   }
+});
+
+// Slide access endpoint
+app.get('/slides/:presentationId/:slideNumber', (req, res) => {
+  const { presentationId, slideNumber } = req.params;
+  const slideIndex = parseInt(slideNumber) - 1; // Convert to zero-based index
+  
+  // Try memory cache first
+  if (presentations[presentationId]) {
+    if (isNaN(slideIndex) || slideIndex < 0 || slideIndex >= presentations[presentationId].slideCount) {
+      return res.status(404).json({ error: 'Slide not found' });
+    }
+    
+    const slidePath = presentations[presentationId].slides[slideIndex];
+    return res.redirect(slidePath); // Redirect to the actual image file
+  }
+  
+  // If not in memory, try database
+  Presentation.findOne({ id: presentationId, isDeleted: false })
+    .then(presentation => {
+      if (!presentation) {
+        return res.status(404).json({ error: 'Presentation not found' });
+      }
+      
+      if (isNaN(slideIndex) || slideIndex < 0 || slideIndex >= presentation.slideCount) {
+        return res.status(404).json({ error: 'Slide not found' });
+      }
+      
+      // Cache for future use
+      presentations[presentationId] = presentation.toObject();
+      
+      const slidePath = presentation.slides[slideIndex];
+      res.redirect(slidePath);
+    })
+    .catch(err => {
+      console.error(`❌ Error fetching slide: ${err}`);
+      res.status(500).json({ error: 'Database error' });
+    });
 });
 
 // User-presentation interaction APIs
