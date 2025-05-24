@@ -403,173 +403,187 @@ app.post('/convert', upload.single('presentation'), async (req, res) => {
   const pdfCmd = `libreoffice --headless --convert-to pdf --outdir ${outputDir} ${inputFile}`;
   console.log(`🔄 Executing PDF conversion: ${pdfCmd}`);
   
-  exec(pdfCmd, async (error, stdout, stderr) => {
-    if (error) {
-      console.error(`❌ PDF conversion error: ${error.message}`);
-      await fallbackToJpgConversion();
-      return;
-    }
-    
-    console.log(`✅ PDF conversion output: ${stdout}`);
-    
-    // Check if PDF was created
-    fs.readdir(outputDir, async (err, files) => {
-      if (err) {
-        console.error(`❌ Error reading output directory: ${err.message}`);
+    exec(pdfCmd, async (error, stdout, stderr) => {
+      if (error) {
+        console.error(`❌ PDF conversion error: ${error.message}`);
         await fallbackToJpgConversion();
         return;
       }
       
-      // Find PDF files
-      const pdfFiles = files.filter(file => file.endsWith('.pdf'));
+      console.log(`✅ PDF conversion output: ${stdout}`);
       
-      if (pdfFiles.length === 0) {
-        console.log('⚠️  No PDF files were generated. Falling back to JPG conversion...');
-        await fallbackToJpgConversion();
-        return;
-      }
-      
-      // Process the PDF file to extract slides
-      const pdfPath = path.join(outputDir, pdfFiles[0]);
-      
-      try {
-        // Get PDF info including page count
-        const pdfInfoCmd = `pdfinfo "${pdfPath}" | grep "Pages:" || echo "Pages: 0"`;
-        const pdfInfoOutput = execSync(pdfInfoCmd).toString();
-        const pageCountMatch = pdfInfoOutput.match(/Pages:\s+(\d+)/);
-        const pageCount = pageCountMatch ? parseInt(pageCountMatch[1]) : 0;
+      // Check if PDF was created
+      fs.readdir(outputDir, async (err, files) => {
+        if (err) {
+          console.error(`❌ Error reading output directory: ${err.message}`);
+          await fallbackToJpgConversion();
+          return;
+        }
         
-        console.log(`📄 PDF has ${pageCount} pages`);
+        // Find PDF files
+        const pdfFiles = files.filter(file => file.endsWith('.pdf'));
         
-        if (pageCount > 0) {
-          // Create directories for temporary files
-          const tempDir = path.join(outputDir, 'temp');
-          if (!fs.existsSync(tempDir)) {
-            fs.mkdirSync(tempDir, { recursive: true });
-          }
+        if (pdfFiles.length === 0) {
+          console.log('⚠️  No PDF files were generated. Falling back to JPG conversion...');
+          await fallbackToJpgConversion();
+          return;
+        }
+        
+        // Process the PDF file to extract slides
+        const pdfPath = path.join(outputDir, pdfFiles[0]);
+        
+        try {
+          // Get PDF info including page count
+          const pdfInfoCmd = `pdfinfo "${pdfPath}" | grep "Pages:" || echo "Pages: 0"`;
+          const pdfInfoOutput = execSync(pdfInfoCmd).toString();
+          const pageCountMatch = pdfInfoOutput.match(/Pages:\s+(\d+)/);
+          const pageCount = pageCountMatch ? parseInt(pageCountMatch[1]) : 0;
           
-          // Create image for each page of the PDF
-          const renamedImageUrls = [];
-          const slideTexts = [];
+          console.log(`📄 PDF has ${pageCount} pages`);
           
-          // Use pdftoppm to convert PDF pages to images
-          for (let i = 0; i < pageCount; i++) {
-            const pageNum = i + 1;
-            const outputPrefix = path.join(tempDir, `slide-${pageNum}`);
+          if (pageCount > 0) {
+            // Create directories for temporary files
+            const tempDir = path.join(outputDir, 'temp');
+            if (!fs.existsSync(tempDir)) {
+              fs.mkdirSync(tempDir, { recursive: true });
+            }
             
-            // Convert PDF page to JPG
-            const convertCmd = `pdftoppm -jpeg -f ${pageNum} -singlefile "${pdfPath}" "${outputPrefix}"`;
+            // CRITICAL FIX: Actually extract images from each PDF page
+            const renamedImageUrls = [];
+            const slideTexts = [];
             
-            try {
-              execSync(convertCmd);
+            console.log(`🔄 Starting slide extraction for ${pageCount} pages`);
+            
+            // Use pdftoppm to convert PDF pages to images
+            for (let i = 0; i < pageCount; i++) {
+              const pageNum = i + 1;
+              const outputPrefix = path.join(tempDir, `slide-${pageNum}`);
               
-              // Find the generated image
-              const tempFile = `${outputPrefix}.jpg`;
-              const finalFile = path.join(outputDir, `slide-${pageNum}.jpg`);
+              // Convert PDF page to JPG
+              const convertCmd = `pdftoppm -jpeg -f ${pageNum} -singlefile "${pdfPath}" "${outputPrefix}"`;
               
-              if (fs.existsSync(tempFile)) {
-                // Copy to final location
-                fs.copyFileSync(tempFile, finalFile);
-                renamedImageUrls.push(`/slides/${presentationId}/slide-${pageNum}.jpg`);
+              console.log(`🖼️  Converting page ${pageNum}: ${convertCmd}`);
+              
+              try {
+                execSync(convertCmd);
                 
-                // Extract text from this page if possible
-                try {
-                  const textCmd = `pdftotext -f ${pageNum} -l ${pageNum} "${pdfPath}" -`;
-                  const pageText = execSync(textCmd).toString().trim();
-                  slideTexts.push(pageText);
-                } catch (textError) {
-                  slideTexts.push(`Slide ${pageNum}`);
+                // Find the generated image
+                const tempFile = `${outputPrefix}.jpg`;
+                const finalFile = path.join(outputDir, `slide-${pageNum}.jpg`);
+                
+                if (fs.existsSync(tempFile)) {
+                  // Copy to final location
+                  fs.copyFileSync(tempFile, finalFile);
+                  renamedImageUrls.push(`/slides/${presentationId}/slide-${pageNum}.jpg`);
+                  
+                  console.log(`✅ Successfully created slide ${pageNum} image`);
+                  
+                  // Extract text from this page if possible
+                  try {
+                    const textCmd = `pdftotext -f ${pageNum} -l ${pageNum} "${pdfPath}" -`;
+                    const pageText = execSync(textCmd).toString().trim();
+                    slideTexts.push(pageText || `Slide ${pageNum}`);
+                  } catch (textError) {
+                    slideTexts.push(`Slide ${pageNum}`);
+                  }
+                } else {
+                  console.error(`❌ Failed to create slide ${pageNum} - file not found: ${tempFile}`);
+                  // Create a placeholder for this slide
+                  createDistinctPlaceholder(finalFile, pageNum, `Page ${pageNum} of ${req.file.originalname}`);
+                  renamedImageUrls.push(`/slides/${presentationId}/slide-${pageNum}.jpg`);
+                  slideTexts.push(`Slide ${pageNum} (Placeholder)`);
                 }
-              } else {
+              } catch (extractError) {
+                console.error(`❌ Error extracting slide ${pageNum}: ${extractError.message}`);
                 // Create a placeholder for this slide
+                const finalFile = path.join(outputDir, `slide-${pageNum}.jpg`);
                 createDistinctPlaceholder(finalFile, pageNum, `Page ${pageNum} of ${req.file.originalname}`);
                 renamedImageUrls.push(`/slides/${presentationId}/slide-${pageNum}.jpg`);
-                slideTexts.push(`Slide ${pageNum} (Placeholder)`);
+                slideTexts.push(`Slide ${pageNum} (Error Placeholder)`);
               }
-            } catch (extractError) {
-              // Create a placeholder for this slide
-              const finalFile = path.join(outputDir, `slide-${pageNum}.jpg`);
-              createDistinctPlaceholder(finalFile, pageNum, `Page ${pageNum} of ${req.file.originalname}`);
-              renamedImageUrls.push(`/slides/${presentationId}/slide-${pageNum}.jpg`);
-              slideTexts.push(`Slide ${pageNum} (Error Placeholder)`);
-            }
-          }
-          
-          // Update presentation with slide data
-          presentation.slides = renamedImageUrls;
-          presentation.slideCount = renamedImageUrls.length;
-          presentation.slideTexts = slideTexts;
-          presentation.isPlaceholder = false;
-          
-          // CRITICAL FIX: Save to database and verify before responding
-          try {
-            console.log(`💾 Saving converted presentation to database...`);
-            const savedPresentation = await saveToDatabase(presentation);
-            
-            // Verify the save worked
-            const verified = await verifyDatabaseSave(presentationId);
-            if (!verified) {
-              throw new Error('Database verification failed');
             }
             
-            // Add to memory cache only after successful database save
-            presentations[presentationId] = savedPresentation;
+            console.log(`🎯 Slide extraction complete: ${renamedImageUrls.length} slides created`);
             
-            // Add presentation to topic indexes
-            topics.forEach(topic => {
-              topic = topic.toLowerCase();
-              if (!presentationsByTopic[topic]) {
-                presentationsByTopic[topic] = [];
+            // CRITICAL FIX: Update presentation with slide data BEFORE saving to database
+            presentation.slides = renamedImageUrls;
+            presentation.slideCount = renamedImageUrls.length;
+            presentation.slideTexts = slideTexts;
+            presentation.isPlaceholder = false;
+            
+            console.log(`📊 Presentation data updated with ${renamedImageUrls.length} slides:`);
+            console.log(`🔗 Sample slide URLs:`, renamedImageUrls.slice(0, 3));
+            
+            // CRITICAL FIX: Save to database and verify before responding
+            try {
+              console.log(`💾 Saving converted presentation to database with slide data...`);
+              const savedPresentation = await saveToDatabase(presentation);
+              
+              // Verify the save worked
+              const verified = await verifyDatabaseSave(presentationId);
+              if (!verified) {
+                throw new Error('Database verification failed');
               }
-              presentationsByTopic[topic].push(presentationId);
+              
+              // Add to memory cache only after successful database save
+              presentations[presentationId] = savedPresentation;
+              
+              // Add presentation to topic indexes
+              topics.forEach(topic => {
+                topic = topic.toLowerCase();
+                if (!presentationsByTopic[topic]) {
+                  presentationsByTopic[topic] = [];
+                }
+                presentationsByTopic[topic].push(presentationId);
+              });
+              
+              console.log(`✅ Successfully saved and verified converted presentation ${presentationId} with ${renamedImageUrls.length} slides`);
+              
+              // Send success response
+              res.json({
+                id: presentationId,
+                originalName: req.file.originalname,
+                title: title,
+                slideCount: renamedImageUrls.length,
+                slides: renamedImageUrls,
+                slideTexts: slideTexts,
+                topics: topics
+              });
+              
+            } catch (dbError) {
+              console.error(`❌ CRITICAL: Failed to save converted presentation to database: ${dbError}`);
+              res.status(500).json({
+                error: "Failed to save presentation to database",
+                details: dbError.message,
+                id: presentationId,
+                status: "database_error"
+              });
+            }
+            
+            // Clean up temporary files
+            try {
+              fs.rmSync(tempDir, { recursive: true, force: true });
+              fs.rmSync(pdfPath, { force: true }); // Also clean up the PDF
+            } catch (cleanupError) {
+              console.error(`❌ Error cleaning up temp files: ${cleanupError.message}`);
+            }
+            
+            // Clean up the uploaded file
+            fs.unlink(inputFile, (err) => {
+              if (err) console.error(`❌ Error deleting uploaded file: ${err.message}`);
             });
             
-            console.log(`✅ Successfully saved and verified converted presentation ${presentationId}`);
-            
-            // Send success response
-            res.json({
-              id: presentationId,
-              originalName: req.file.originalname,
-              title: title,
-              slideCount: renamedImageUrls.length,
-              slides: renamedImageUrls,
-              slideTexts: slideTexts,
-              topics: topics
-            });
-            
-          } catch (dbError) {
-            console.error(`❌ CRITICAL: Failed to save converted presentation to database: ${dbError}`);
-            res.status(500).json({
-              error: "Failed to save presentation to database",
-              details: dbError.message,
-              id: presentationId,
-              status: "database_error"
-            });
+            return;
+          } else {
+            console.log('⚠️  PDF has no pages. Falling back to JPG conversion...');
+            await fallbackToJpgConversion();
           }
-          
-          // Clean up temporary files
-          try {
-            fs.rmSync(tempDir, { recursive: true, force: true });
-          } catch (cleanupError) {
-            console.error(`❌ Error cleaning up temp directory: ${cleanupError.message}`);
-          }
-          
-          // Clean up the uploaded file
-          fs.unlink(inputFile, (err) => {
-            if (err) console.error(`❌ Error deleting uploaded file: ${err.message}`);
-          });
-          
-          return;
-        } else {
-          console.log('⚠️  PDF has no pages. Falling back to JPG conversion...');
+        } catch (pdfError) {
+          console.error(`❌ Error processing PDF: ${pdfError.message}`);
           await fallbackToJpgConversion();
         }
-      } catch (pdfError) {
-        console.error(`❌ Error processing PDF: ${pdfError.message}`);
-        await fallbackToJpgConversion();
-      }
+      });
     });
-  });
   
   // Fallback function for JPG conversion if PDF route fails
   async function fallbackToJpgConversion() {
