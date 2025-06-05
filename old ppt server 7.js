@@ -1115,32 +1115,6 @@ app.put('/presentation/:id', async (req, res) => {
   }
 });
 
-// Diagnostic endpoint to check what's actually in MongoDB
-app.get('/diag/:id', async (req, res) => {
-  try {
-    const doc = await Presentation.findOne({id: req.params.id}).lean();
-    if (!doc) {
-      return res.status(404).json({ error: 'Not found' });
-    }
-    
-    res.json({
-      id: doc.id,
-      title: doc.title,
-      slideCount: doc.slideCount,
-      hasSlides: !!doc.slides,
-      slidesLength: doc.slides?.length || 0,
-      firstSlideURL: doc.slides?.[0] || 'NONE',
-      hasSlideTexts: !!doc.slideTexts,
-      slideTextsLength: doc.slideTexts?.length || 0,
-      firstSlideText: doc.slideTexts?.[0] || 'NONE',
-      allFields: Object.keys(doc).sort()
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-
 // Get presentations by topic
 app.get('/presentations/topic/:topic', async (req, res) => {
   const topic = req.params.topic.toLowerCase();
