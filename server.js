@@ -1491,6 +1491,12 @@ app.get('/upload-progress/:id', (req, res) => {
   res.json({ progress: 0, status: 'waiting' });
 });
 
+// Clear cache endpoint
+app.get('/clear-cache', (req, res) => {
+    Object.keys(presentations).forEach(key => delete presentations[key]);
+    res.json({ message: 'Cache cleared' });
+});
+
 // Error handler
 app.use((err, req, res, next) => {
   console.error(`❌ Server error: ${err.stack}`);
