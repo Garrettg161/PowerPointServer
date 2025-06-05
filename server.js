@@ -1065,6 +1065,43 @@ app.get('/presentations', async (req, res) => {
   }
 });
 
+// Fix broken presentation data
+app.get('/fix-presentation/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const presentation = await Presentation.findOne({ id });
+    
+    if (!presentation) {
+      return res.status(404).json({ error: 'Presentation not found' });
+    }
+    
+    // Regenerate the slides and slideTexts arrays
+    const slides = [];
+    const slideTexts = [];
+    
+    for (let i = 1; i <= presentation.slideCount; i++) {
+      slides.push(`/slides/${id}/slide-${i}.jpg`);
+      slideTexts.push(`Slide ${i}`); // Basic text since we don't have the original
+    }
+    
+    // Update the presentation
+    presentation.slides = slides;
+    presentation.slideTexts = slideTexts;
+    await presentation.save();
+    
+    // Clear cache
+    delete presentations[id];
+    
+    res.json({
+      message: 'Fixed presentation',
+      slides: slides.length,
+      slideTexts: slideTexts.length
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Simplified: Forward the metadata to the convert endpoint
 app.post('/presentations', upload.single('presentation'), (req, res) => {
   if (!req.file) {
