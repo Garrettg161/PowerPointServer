@@ -959,7 +959,8 @@ app.get('/presentation/:id', async (req, res) => {
   // If not in memory, try to get from database
   try {
     console.log(`🔍 Searching database for presentation: ${presentationId}`);
-    const dbPresentation = await Presentation.findOne({ id: presentationId, isDeleted: false });
+    // CRITICAL FIX: Use lean() to get all fields as plain object
+    const dbPresentation = await Presentation.findOne({ id: presentationId, isDeleted: false }).lean();
     
     if (!dbPresentation) {
       console.log(`❌ Presentation ${presentationId} not found in database`);
@@ -967,13 +968,13 @@ app.get('/presentation/:id', async (req, res) => {
     }
     
     console.log(`✅ Found presentation ${presentationId} in database`);
+    console.log(`📊 Database document has ${dbPresentation.slides?.length || 0} slides and ${dbPresentation.slideTexts?.length || 0} slide texts`);
     
     // Add to memory cache
-    const presentation = dbPresentation.toObject();
-    presentations[presentationId] = presentation;
+    presentations[presentationId] = dbPresentation;
     
     // Update topic indexes
-    (presentation.topics || []).forEach(topic => {
+    (dbPresentation.topics || []).forEach(topic => {
       topic = topic.toLowerCase();
       if (!presentationsByTopic[topic]) {
         presentationsByTopic[topic] = [];
@@ -986,8 +987,10 @@ app.get('/presentation/:id', async (req, res) => {
     // Track this view
     if (userId) {
       // Update view count
-      dbPresentation.viewCount = (dbPresentation.viewCount || 0) + 1;
-      await dbPresentation.save();
+      await Presentation.findOneAndUpdate(
+        { id: presentationId },
+        { $inc: { viewCount: 1 } }
+      );
       
       // Add to user history
       if (!userPresentationHistory[userId]) {
@@ -998,7 +1001,7 @@ app.get('/presentation/:id', async (req, res) => {
       }
     }
     
-    return res.json(presentation);
+    return res.json(dbPresentation);
   } catch (err) {
     console.error(`❌ Error fetching presentation from database: ${err}`);
     return res.status(500).json({ error: 'Database error' });
