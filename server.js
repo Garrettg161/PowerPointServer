@@ -1327,6 +1327,47 @@ app.get('/user/:userId/unseen/:topic', async (req, res) => {
   }
 });
 
+// Add this endpoint to server.js (around line 1300)
+app.get('/fix-storage', async (req, res) => {
+  const publicDir = path.join(__dirname, 'public');
+  const slidesDir = path.join(__dirname, 'public', 'slides');
+  
+  try {
+    // Create directories if they don't exist
+    if (!fs.existsSync(publicDir)) {
+      fs.mkdirSync(publicDir, { recursive: true });
+      console.log('Created public directory');
+    }
+    
+    if (!fs.existsSync(slidesDir)) {
+      fs.mkdirSync(slidesDir, { recursive: true });
+      console.log('Created slides directory');
+    }
+    
+    // Test if we can write to the volume
+    const testFile = path.join(slidesDir, 'test.txt');
+    fs.writeFileSync(testFile, 'Volume is working!');
+    const testContent = fs.readFileSync(testFile, 'utf8');
+    
+    res.json({
+      success: true,
+      publicExists: fs.existsSync(publicDir),
+      slidesExists: fs.existsSync(slidesDir),
+      volumeWriteable: testContent === 'Volume is working!',
+      directories: {
+        public: publicDir,
+        slides: slidesDir
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: error.message,
+      publicExists: fs.existsSync(publicDir),
+      slidesExists: fs.existsSync(slidesDir)
+    });
+  }
+});
+
 app.post('/user/:userId/seen/:presentationId', (req, res) => {
   const { userId, presentationId } = req.params;
   
