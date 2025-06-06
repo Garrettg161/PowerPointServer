@@ -982,10 +982,8 @@ app.get('/presentation/:id', async (req, res) => {
   // If not in memory, try to get from database
   try {
     console.log(`🔍 Searching database for presentation: ${presentationId}`);
-    // CRITICAL FIX: Use select() to explicitly include slides and slideTexts fields
-    const dbPresentation = await Presentation.findOne({ id: presentationId, isDeleted: false })
-      .select('+slides +slideTexts')  // Force inclusion of these fields
-      .lean();
+    // CRITICAL FIX: Use lean() to get all fields as plain object
+    const dbPresentation = await Presentation.findOne({ id: presentationId, isDeleted: false }).lean();
     
     if (!dbPresentation) {
       console.log(`❌ Presentation ${presentationId} not found in database`);
@@ -994,11 +992,6 @@ app.get('/presentation/:id', async (req, res) => {
     
     console.log(`✅ Found presentation ${presentationId} in database`);
     console.log(`📊 Database document has ${dbPresentation.slides?.length || 0} slides and ${dbPresentation.slideTexts?.length || 0} slide texts`);
-    
-    // Debug log the first slide text if available
-    if (dbPresentation.slideTexts && dbPresentation.slideTexts.length > 0) {
-      console.log(`📝 First slide text preview: ${dbPresentation.slideTexts[0].substring(0, 100)}...`);
-    }
     
     // Add to memory cache
     presentations[presentationId] = dbPresentation;
