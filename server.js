@@ -1,4 +1,4 @@
-// server.js - PowerPoint Conversion Server v 1.7 with FIXED MongoDB Persistence & working Slide urls
+// server.js - PowerPoint Conversion Server v 1.8 with FIXED MongoDB Persistence, working Slide urls, and Slide storage on a Vo.lume
 const express = require('express');
 const multer = require('multer');
 const fs = require('fs');
@@ -10,6 +10,29 @@ const mongoose = require('mongoose');
 
 const app = express();
 const port = process.env.PORT || 3001;
+
+// Add this at the very beginning of server.js, right after the imports (around line 15)
+// Initialize directories on startup
+const initializeDirectories = () => {
+  const publicDir = path.join(__dirname, 'public');
+  const slidesDir = path.join(__dirname, 'public', 'slides');
+  
+  if (!fs.existsSync(publicDir)) {
+    fs.mkdirSync(publicDir, { recursive: true });
+    console.log('📁 Created public directory on startup');
+  }
+  
+  if (!fs.existsSync(slidesDir)) {
+    fs.mkdirSync(slidesDir, { recursive: true });
+    console.log('📁 Created slides directory on startup');
+  }
+  
+  console.log(`📁 Directory check - public exists: ${fs.existsSync(publicDir)}, slides exists: ${fs.existsSync(slidesDir)}`);
+};
+
+// Call it immediately
+initializeDirectories();
+
 
 // MongoDB connection setup
 const mongoUri = process.env.MONGODB_URI || 'mongodb://localhost:27017/dworld';
