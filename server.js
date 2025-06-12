@@ -109,33 +109,87 @@ const userPresentationHistory = {};
 // CRITICAL FIX: Function to ensure database write succeeds before responding
 async function saveToDatabase(presentationData) {
   console.log(`🔄 ATTEMPTING DATABASE SAVE for presentation: ${presentationData.id}`);
+  
+  // CRITICAL: Log ALL data including arrays
   console.log(`📊 Data being saved:`, JSON.stringify({
     id: presentationData.id,
     title: presentationData.title,
     slideCount: presentationData.slideCount,
+    slidesLength: presentationData.slides?.length || 0,
+    slideTextsLength: presentationData.slideTexts?.length || 0,
+    hasSlides: !!presentationData.slides,
+    hasSlideTexts: !!presentationData.slideTexts,
+    firstSlide: presentationData.slides?.[0] || 'NONE',
+    firstSlideText: presentationData.slideTexts?.[0] || 'NONE',
     topics: presentationData.topics
   }, null, 2));
 
+  // CRITICAL: Ensure arrays are not undefined
+  const dataToSave = {
+    id: presentationData.id,
+    originalName: presentationData.originalName,
+    title: presentationData.title,
+    summary: presentationData.summary || '',
+    author: presentationData.author || 'Anonymous',
+    authorId: presentationData.authorId,
+    topics: presentationData.topics || [],
+    slideCount: presentationData.slideCount || 0,
+    slides: presentationData.slides || [],  // ENSURE ARRAY
+    slideTexts: presentationData.slideTexts || [],  // ENSURE ARRAY
+    converted: presentationData.converted || new Date(),
+    isPlaceholder: presentationData.isPlaceholder || false,
+    viewCount: presentationData.viewCount || 0,
+    isDeleted: false
+  };
+
+  // Debug log the actual data
+  console.log(`📊 CRITICAL: About to save slides array with ${dataToSave.slides.length} items`);
+  console.log(`📊 CRITICAL: About to save slideTexts array with ${dataToSave.slideTexts.length} items`);
+  
   try {
-    // First, check if presentation already exists
+    // Check if presentation already exists
     const existingPresentation = await Presentation.findOne({ id: presentationData.id });
     
     if (existingPresentation) {
       console.log(`⚠️  Presentation ${presentationData.id} already exists in database. Updating...`);
       
-      // Update existing presentation
+      // CRITICAL: Use $set to ensure arrays are saved
       const updatedPresentation = await Presentation.findOneAndUpdate(
         { id: presentationData.id },
-        presentationData,
-        { new: true, upsert: false }
+        {
+          $set: dataToSave  // Use $set to ensure all fields including arrays are updated
+        },
+        {
+          new: true,
+          upsert: false,
+          runValidators: true
+        }
       );
+      
+      // Verify the update worked
+      const verified = await Presentation.findOne({ id: presentationData.id }).lean();
+      console.log(`✅ VERIFICATION: Updated document has ${verified.slides?.length || 0} slides and ${verified.slideTexts?.length || 0} slideTexts`);
+      
+      if (!verified.slides || verified.slides.length === 0) {
+        console.error(`❌ CRITICAL ERROR: Slides array was not saved to database!`);
+        throw new Error('Slides array not saved');
+      }
       
       console.log(`✅ SUCCESSFULLY UPDATED presentation ${presentationData.id} in database`);
       return updatedPresentation.toObject();
     } else {
-      // Create new presentation
-      const presentationDoc = new Presentation(presentationData);
+      // Create new presentation document
+      const presentationDoc = new Presentation(dataToSave);
       const savedDoc = await presentationDoc.save();
+      
+      // Verify the save worked
+      const verified = await Presentation.findOne({ id: presentationData.id }).lean();
+      console.log(`✅ VERIFICATION: Saved document has ${verified.slides?.length || 0} slides and ${verified.slideTexts?.length || 0} slideTexts`);
+      
+      if (!verified.slides || verified.slides.length === 0) {
+        console.error(`❌ CRITICAL ERROR: Slides array was not saved to database!`);
+        throw new Error('Slides array not saved');
+      }
       
       console.log(`✅ SUCCESSFULLY SAVED NEW presentation ${presentationData.id} to database`);
       console.log(`📝 Database document ID: ${savedDoc._id}`);
@@ -147,7 +201,6 @@ async function saveToDatabase(presentationData) {
     throw error; // Re-throw to handle in calling function
   }
 }
-
 // CRITICAL FIX: Function to verify database save succeeded
 async function verifyDatabaseSave(presentationId) {
   try {
@@ -617,14 +670,7 @@ app.post('/convert', upload.single('presentation'), async (req, res) => {
                   
                   console.log(`✅ Successfully created slide ${pageNum} image`);
                   
-                  // Extract text from this page if possible
-                  try {
                     const textCmd = `pdftotext -f ${pageNum} -l ${pageNum} "${pdfPath}" -`;
-                    const pageText = execSync(textCmd).toString().trim();
-                    slideTexts.push(pageText || `Slide ${pageNum}`);
-                  } catch (textError) {
-                    slideTexts.push(`Slide ${pageNum}`);
-                  }
                 } else {
                   console.error(`❌ Failed to create slide ${pageNum} - file not found: ${tempFile}`);
                   // Create a placeholder for this slide
