@@ -1,4 +1,4 @@
-// server.js - PowerPoint Conversion Server v 1.8 with FIXED MongoDB Persistence, working Slide urls, and Slide storage on a Vo.lume
+// server.js - PowerPoint Conversion Server v1.9 with FIXED cache management for slides/slideTexts/present
 const express = require('express');
 const multer = require('multer');
 const fs = require('fs');
@@ -1097,16 +1097,13 @@ app.get('/presentation/:id', async (req, res) => {
   }
 });
 
-// FIXED: Get list of presentations with proper database queries
+// FIXED: Get list of presentations with proper database queries (v1.9)
 app.get('/presentations', async (req, res) => {
   console.log(`📚 Getting all presentations...`);
   
   try {
-    // Get presentations from database
-    const dbPresentations = await Presentation.find(
-      { isDeleted: false },
-      'id originalName title summary author topics slideCount converted isPlaceholder viewCount'
-    );
+    // Get presentations from database - NO FIELD SELECTION to get ALL fields
+    const dbPresentations = await Presentation.find({ isDeleted: false });
     
     console.log(`✅ Found ${dbPresentations.length} presentations in database`);
     
@@ -1114,7 +1111,18 @@ app.get('/presentations', async (req, res) => {
     
     // Update memory cache
     presentationList.forEach(p => {
-      presentations[p.id] = p;
+      // CRITICAL: Only cache if we have complete data
+      if (p.slides && p.slideTexts) {
+        presentations[p.id] = p;
+        console.log(`✅ Cached presentation ${p.id} with ${p.slides.length} slides and ${p.slideTexts.length} texts`);
+      } else {
+        // Don't cache incomplete presentations
+        console.log(`⚠️ Not caching presentation ${p.id} - missing slides/slideTexts arrays`);
+        // If it was previously cached with full data, keep the old cache
+        if (presentations[p.id] && presentations[p.id].slides) {
+          console.log(`📌 Keeping existing cache for ${p.id}`);
+        }
+      }
       
       // Update topic indexes
       (p.topics || []).forEach(topic => {
@@ -1127,6 +1135,15 @@ app.get('/presentations', async (req, res) => {
         }
       });
     });
+    
+    console.log(`📊 Memory cache updated with presentations`);
+    
+    res.json({ presentations: presentationList });
+  } catch (err) {
+    console.error(`❌ Error getting presentations: ${err}`);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
     
     console.log(`📊 Memory cache updated with ${Object.keys(presentations).length} presentations`);
     
