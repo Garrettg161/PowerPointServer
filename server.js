@@ -1144,32 +1144,6 @@ app.get('/presentations', async (req, res) => {
     res.status(500).json({ error: 'Database error' });
   }
 });
-    
-    console.log(`📊 Memory cache updated with ${Object.keys(presentations).length} presentations`);
-    
-    res.json({ presentations: presentationList });
-  } catch (err) {
-    console.error(`❌ Error getting presentations: ${err}`);
-    
-    // Fallback to memory cache if database fails
-    const presentationList = Object.values(presentations).map(p => ({
-      id: p.id,
-      originalName: p.originalName,
-      title: p.title || p.originalName,
-      summary: p.summary || "",
-      author: p.author || "Anonymous",
-      topics: p.topics || [],
-      slideCount: p.slideCount,
-      converted: p.converted,
-      isPlaceholder: p.isPlaceholder || false,
-      viewCount: p.viewCount || 0
-    }));
-    
-    console.log(`⚠️  Using memory cache fallback: ${presentationList.length} presentations`);
-    
-    res.json({ presentations: presentationList });
-  }
-});
 
 // Fix broken presentation data
 app.get('/fix-presentation/:id', async (req, res) => {
